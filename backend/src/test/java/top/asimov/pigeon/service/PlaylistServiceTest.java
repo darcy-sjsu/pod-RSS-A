@@ -91,7 +91,8 @@ class PlaylistServiceTest {
         feedDefaultsService,
         Runnable::run,
         appBaseUrlResolver);
-    when(messageSource.getMessage(any(), any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
+    lenient().when(messageSource.getMessage(any(), any(), any()))
+        .thenAnswer(invocation -> invocation.getArgument(0));
     lenient().when(playlistMapper.updateById(any(Playlist.class))).thenReturn(1);
     lenient().when(playlistEpisodeMapper.selectMappingsByPlaylistId("pl")).thenReturn(Collections.emptyList());
     lenient().when(playlistEpisodeMapper.insertMapping(any(), any(), any(), any(), any(), any(), any())).thenReturn(1);
