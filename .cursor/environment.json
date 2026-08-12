@@ -1,0 +1,22 @@
+{
+  "name": "PigeonPod",
+  "user": "ubuntu",
+  "install": "bash .cursor/install.sh",
+  "start": "bash .cursor/start.sh",
+  "terminals": [
+    {
+      "name": "backend",
+      "description": "Spring Boot API on :8080 (SQLite at /data/pigeon-pod.db). Touches resources first so Flyway migrations and i18n bundles reach the classpath despite zero-mtime checkouts.",
+      "command": "cd backend && find src/main/resources -type f -exec touch {} + && SPRING_DATASOURCE_URL='jdbc:sqlite:/data/pigeon-pod.db?journal_mode=WAL&synchronous=NORMAL&cache_size=10000&temp_store=memory&busy_timeout=3000' mvn spring-boot:run"
+    },
+    {
+      "name": "frontend",
+      "description": "Vite dev server on :5173, proxies /api and /media to the backend on :8080.",
+      "command": "cd frontend && npm run dev -- --host 0.0.0.0"
+    }
+  ],
+  "ports": [
+    { "name": "backend", "port": 8080 },
+    { "name": "frontend", "port": 5173 }
+  ]
+}
