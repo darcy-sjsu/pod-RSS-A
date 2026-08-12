@@ -33,6 +33,26 @@ import {
 import { useDateFormat } from '../../hooks/useDateFormat.js';
 
 const PAGE_SIZE = 10;
+const BULK_ACTION_TEXT_KEYS = {
+  CANCEL: {
+    labelKey: 'dashboard_cancel_all',
+    confirmKey: 'dashboard_confirm_cancel_all',
+    successKey: 'dashboard_bulk_cancel_success',
+    errorKey: 'dashboard_bulk_cancel_failed',
+  },
+  DELETE: {
+    labelKey: 'dashboard_delete_all',
+    confirmKey: 'dashboard_confirm_delete_all',
+    successKey: 'dashboard_bulk_delete_success',
+    errorKey: 'dashboard_bulk_delete_failed',
+  },
+  RETRY: {
+    labelKey: 'dashboard_retry_all',
+    confirmKey: 'dashboard_confirm_retry_all',
+    successKey: 'dashboard_bulk_retry_success',
+    errorKey: 'dashboard_bulk_retry_failed',
+  },
+};
 
 const DashboardEpisodes = () => {
   const { t } = useTranslation();
@@ -98,27 +118,6 @@ const DashboardEpisodes = () => {
   const statusConfirmLabel = t(currentDefinition.confirmLabelKey);
   const bulkActionDefinitions = currentDefinition.bulkActions || [];
 
-  const bulkActionTextKeys = {
-    CANCEL: {
-      labelKey: 'dashboard_cancel_all',
-      confirmKey: 'dashboard_confirm_cancel_all',
-      successKey: 'dashboard_bulk_cancel_success',
-      errorKey: 'dashboard_bulk_cancel_failed',
-    },
-    DELETE: {
-      labelKey: 'dashboard_delete_all',
-      confirmKey: 'dashboard_confirm_delete_all',
-      successKey: 'dashboard_bulk_delete_success',
-      errorKey: 'dashboard_bulk_delete_failed',
-    },
-    RETRY: {
-      labelKey: 'dashboard_retry_all',
-      confirmKey: 'dashboard_confirm_retry_all',
-      successKey: 'dashboard_bulk_retry_success',
-      errorKey: 'dashboard_bulk_retry_failed',
-    },
-  };
-
   const getBulkActionTextKeys = useCallback((actionType, status) => {
     if (actionType === 'DELETE' && status === 'FAILED') {
       return {
@@ -129,7 +128,7 @@ const DashboardEpisodes = () => {
       };
     }
 
-    return bulkActionTextKeys[actionType] || null;
+    return BULK_ACTION_TEXT_KEYS[actionType] || null;
   }, []);
 
   useEffect(() => {
