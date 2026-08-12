@@ -11,7 +11,6 @@ import {
 } from '@mantine/core';
 import logo from '../assets/pigeonpod.svg';
 import {
-  IconLanguage,
   IconLogout2,
   IconMoon,
   IconSettings,
@@ -34,12 +33,7 @@ function Header() {
   const state = Array.isArray(contextValue) ? contextValue[0] : (contextValue?.state || contextValue);
   const dispatch = Array.isArray(contextValue) ? contextValue[1] : (contextValue?.dispatch || (() => null));
   const navigate = useNavigate();
-  const { i18n, t } = useTranslation();
-
-  function changeLanguageWithStorage(lng) {
-    i18n.changeLanguage(lng);
-    localStorage.setItem('language', lng);
-  }
+  const { t } = useTranslation();
 
   async function logout() {
     await API.post('/api/auth/logout');
@@ -57,39 +51,6 @@ function Header() {
           {/*<Title order={4}>{t('header_title')}</Title>*/}
         </Group>
         <Group>
-          <Menu>
-            <Menu.Target>
-              <ActionIcon variant="default" size="sm">
-                <IconLanguage />
-              </ActionIcon>
-            </Menu.Target>
-            <Menu.Dropdown>
-              <Menu.Item onClick={() => changeLanguageWithStorage('en')}>
-                {t('header_lang_en')}
-              </Menu.Item>
-              <Menu.Item onClick={() => changeLanguageWithStorage('zh')}>
-                {t('header_lang_zh')}
-              </Menu.Item>
-              <Menu.Item onClick={() => changeLanguageWithStorage('es')}>
-                {t('header_lang_es')}
-              </Menu.Item>
-              <Menu.Item onClick={() => changeLanguageWithStorage('ja')}>
-                {t('header_lang_ja')}
-              </Menu.Item>
-              <Menu.Item onClick={() => changeLanguageWithStorage('pt')}>
-                {t('header_lang_pt')}
-              </Menu.Item>
-              <Menu.Item onClick={() => changeLanguageWithStorage('fr')}>
-                {t('header_lang_fr')}
-              </Menu.Item>
-              <Menu.Item onClick={() => changeLanguageWithStorage('de')}>
-                {t('header_lang_de')}
-              </Menu.Item>
-              <Menu.Item onClick={() => changeLanguageWithStorage('ko')}>
-                {t('header_lang_ko')}
-              </Menu.Item>
-            </Menu.Dropdown>
-          </Menu>
           <ActionIcon variant="default" size="sm">
             {'dark' === computedColorScheme ? (
               <IconSun onClick={toggleColorScheme} />

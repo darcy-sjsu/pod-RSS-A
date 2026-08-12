@@ -48,24 +48,12 @@ import StatisticsCard from '../../components/StatisticsCard/StatisticsCard.jsx';
 import { UserContext } from '../../context/User/UserContext.jsx';
 
 const INVALID_SOURCE_MESSAGE_PATTERNS = [
-  'Invalid YouTube channel URL',
-  'Invalid YouTube playlist URL',
-  'Invalid YouTube video URL',
   '无效的YouTube频道URL',
   '无效的YouTube播放列表URL',
   '无效的 YouTube 视频 URL',
-  'URL de canal de YouTube inválida',
-  'URL de lista de reproducción de YouTube inválida',
-  'URL do canal do YouTube inválida',
-  'URL de playlist do YouTube inválida',
-  '無効なYouTubeチャンネルURLです',
-  '無効なYouTubeプレイリストURLです',
-  'URL de chaîne YouTube invalide',
-  'URL de playlist YouTube invalide',
-  'Ungültige YouTube-Kanal-URL',
-  'Ungültige YouTube-Playlist-URL',
-  '유효하지 않은 YouTube 채널 URL입니다',
-  '유효하지 않은 YouTube 플레이리스트 URL입니다',
+  'Invalid YouTube channel URL',
+  'Invalid YouTube playlist URL',
+  'Invalid YouTube video URL',
 ];
 
 function isValidFeedSource(source) {
