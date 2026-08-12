@@ -68,6 +68,8 @@ public class DownloadHandler {
 
   @Value("${pigeon.ffmpeg-location:}")
   private String ffmpegLocation;
+  @Value("${pigeon.yt-dlp.po-token-provider-url:}")
+  private String poTokenProviderUrl;
   private final Set<String> reservedOutputBaseNames = ConcurrentHashMap.newKeySet();
   private final EpisodeMapper episodeMapper;
   private final CookieService cookieService;
@@ -513,6 +515,7 @@ public class DownloadHandler {
     // 添加字幕下载选项
     addSubtitleOptions(command, feedContext);
 
+    addPoTokenProviderOptions(command);
     ytDlpProxyService.appendCurrentProxyArgs(command);
     if (feedContext.downloadType() == DownloadType.AUDIO) {
       // 音频两阶段策略：第一阶段只下载与常规后处理，禁止隐式章节嵌入
@@ -811,6 +814,14 @@ public class DownloadHandler {
       return;
     }
     command.addAll(customArgs);
+  }
+
+  private void addPoTokenProviderOptions(List<String> command) {
+    if (!StringUtils.hasText(poTokenProviderUrl)) {
+      return;
+    }
+    command.add("--extractor-args");
+    command.add("youtubepot-bgutilhttp:base_url=" + poTokenProviderUrl.trim());
   }
 
   /**

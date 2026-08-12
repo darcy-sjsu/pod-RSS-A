@@ -55,6 +55,7 @@ pigeon:
     managed-root: /data/tools/yt-dlp
     keep-versions: 3
     update-timeout-seconds: 300
+    po-token-provider-url: ${PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL:}
   download:
     process-timeout-minutes: 60
 
