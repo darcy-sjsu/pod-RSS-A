@@ -2,6 +2,7 @@ package top.asimov.pigeon.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -56,7 +57,8 @@ class ChannelServiceTest {
         messageSource,
         feedDefaultsService,
         appBaseUrlResolver);
-    when(messageSource.getMessage(any(), any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
+    lenient().when(messageSource.getMessage(any(), any(), any()))
+        .thenAnswer(invocation -> invocation.getArgument(0));
   }
 
   @Test
