@@ -447,6 +447,13 @@ public class YoutubeVideoHelper {
     ChannelListResponse channelResponse = youtubeApiExecutor.execute(
         YoutubeApiMethod.CHANNELS_LIST,
         channelRequest::execute);
+    if (channelResponse == null || CollectionUtils.isEmpty(channelResponse.getItems())
+        || channelResponse.getItems().get(0).getContentDetails() == null
+        || channelResponse.getItems().get(0).getContentDetails().getRelatedPlaylists() == null
+        || !StringUtils.hasText(
+        channelResponse.getItems().get(0).getContentDetails().getRelatedPlaylists().getUploads())) {
+      throw new IOException("YouTube channel uploads playlist was not found");
+    }
     return channelResponse.getItems().get(0).getContentDetails().getRelatedPlaylists().getUploads();
   }
 

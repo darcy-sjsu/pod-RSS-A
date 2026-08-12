@@ -7,6 +7,7 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -89,5 +90,24 @@ class ChannelServiceTest {
     verify(episodeService).detachChannelEpisodes("channel");
     verify(channelMapper).deleteById("channel");
     verify(episodeService, never()).deleteEpisodesByChannelId("channel");
+  }
+
+  @Test
+  void incrementallyFetchesUntilLastSynchronizedVideo() {
+    Channel channel = Channel.builder()
+        .id("channel")
+        .title("Channel")
+        .lastSyncVideoId("last-synchronized")
+        .build();
+    when(youtubeChannelHelper.fetchYoutubeChannelVideos(
+        "channel", Integer.MAX_VALUE, "last-synchronized",
+        null, null, null, null, null, null)).thenReturn(List.of());
+    when(channelMapper.updateById(channel)).thenReturn(1);
+
+    channelService.refreshChannel(channel);
+
+    verify(youtubeChannelHelper).fetchYoutubeChannelVideos(
+        "channel", Integer.MAX_VALUE, "last-synchronized",
+        null, null, null, null, null, null);
   }
 }

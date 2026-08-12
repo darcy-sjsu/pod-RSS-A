@@ -429,11 +429,12 @@ public class ChannelService extends AbstractFeedService<Channel> {
 
   @Override
   protected List<Episode> fetchIncrementalEpisodes(Channel feed) {
-    // 仅抓取最新一页（最多 50 条），通过与数据库已有的 Episode ID 做差值，确定真正新增的节目。
+    // Continue paging until the last synchronized video is reached. This prevents permanently
+    // missing uploads when more than 50 videos arrive between synchronization runs.
     List<Episode> episodes = youtubeChannelHelper.fetchYoutubeChannelVideos(
         feed.getId(),
-        1,
-        null,
+        Integer.MAX_VALUE,
+        feed.getLastSyncVideoId(),
         feed.getTitleContainKeywords(),
         feed.getTitleExcludeKeywords(),
         feed.getDescriptionContainKeywords(),

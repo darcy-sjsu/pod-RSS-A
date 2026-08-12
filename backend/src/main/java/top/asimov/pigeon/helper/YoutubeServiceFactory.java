@@ -17,7 +17,9 @@ import top.asimov.pigeon.config.ProxyExecutionScope;
 @Component
 public class YoutubeServiceFactory {
 
-  private static final String APPLICATION_NAME = "My YouTube App";
+  private static final String APPLICATION_NAME = "PigeonPod";
+  private static final int DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
+  private static final int DEFAULT_READ_TIMEOUT_MS = 45_000;
   private static final JacksonFactory JSON_FACTORY = JacksonFactory.getDefaultInstance();
 
   private final OutboundProxyHolder proxyHolder;
@@ -43,7 +45,14 @@ public class YoutubeServiceFactory {
     try {
       log.info("[youtube-api] client route selected: route={}", describeRoute(settings));
       NetHttpTransport transport = buildTransport(settings);
-      return new YouTube.Builder(transport, JSON_FACTORY, requestInitializer)
+      HttpRequestInitializer effectiveInitializer = request -> {
+        request.setConnectTimeout(DEFAULT_CONNECT_TIMEOUT_MS);
+        request.setReadTimeout(DEFAULT_READ_TIMEOUT_MS);
+        if (requestInitializer != null) {
+          requestInitializer.initialize(request);
+        }
+      };
+      return new YouTube.Builder(transport, JSON_FACTORY, effectiveInitializer)
           .setApplicationName(APPLICATION_NAME)
           .build();
     } catch (GeneralSecurityException | IOException e) {
