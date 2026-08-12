@@ -1,6 +1,8 @@
 package top.asimov.pigeon.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.eq;
@@ -33,6 +35,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.MessageSource;
 import top.asimov.pigeon.config.AppBaseUrlResolver;
 import top.asimov.pigeon.config.YoutubeApiKeyHolder;
+import top.asimov.pigeon.exception.BusinessException;
 import top.asimov.pigeon.helper.YoutubeHelper;
 import top.asimov.pigeon.helper.YoutubePlaylistHelper;
 import top.asimov.pigeon.helper.YoutubeVideoHelper;
@@ -126,6 +129,18 @@ class PlaylistServiceTest {
         eq("https://www.youtube.com/channel/owner"));
     verify(episodeService).saveEpisodes(anyList());
     verify(episodeService).markEpisodesPending(anyList());
+  }
+
+  @Test
+  void surfacesPlaylistSyncFailureWithoutDelayingRetry() {
+    Playlist playlist = youtubePlaylist();
+    when(playlistMapper.selectById("pl")).thenReturn(playlist);
+    when(youtubePlaylistHelper.fetchAllPlaylistItemsOfficial("pl"))
+        .thenThrow(new BusinessException("remote unavailable"));
+
+    assertThrows(BusinessException.class, () -> playlistService.refreshPlaylistById("pl"));
+    assertNull(playlist.getLastSyncTimestamp());
+    verify(playlistMapper).updateById(playlist);
   }
 
   @Test

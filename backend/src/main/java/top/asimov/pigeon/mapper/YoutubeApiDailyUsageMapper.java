@@ -47,6 +47,16 @@ public interface YoutubeApiDailyUsageMapper {
       """)
   int blockAutoSync(@Param("usageDatePt") String usageDatePt, @Param("reason") String reason);
 
+  @Update("""
+      UPDATE youtube_api_daily_usage
+      SET auto_sync_blocked = 0,
+          blocked_reason = NULL,
+          blocked_at = NULL,
+          updated_at = CURRENT_TIMESTAMP
+      WHERE usage_date_pt = #{usageDatePt}
+      """)
+  int clearAutoSyncBlock(@Param("usageDatePt") String usageDatePt);
+
   @Select("SELECT * FROM youtube_api_daily_usage WHERE usage_date_pt = #{usageDatePt} LIMIT 1")
   YoutubeApiDailyUsage selectByDate(@Param("usageDatePt") String usageDatePt);
 

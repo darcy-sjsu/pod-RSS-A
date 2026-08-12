@@ -431,15 +431,10 @@ public class PlaylistService extends AbstractFeedService<Playlist> {
       String error = abbreviateError(e.getMessage());
       playlist.setSyncError(error);
       playlist.setSyncErrorAt(now);
-      playlist.setLastSyncTimestamp(now);
       playlistMapper.updateById(playlist);
       log.error("[feed-sync] youtube playlist sync failed: playlistId={} mode={} reason={}",
           playlist.getId(), mode, e.getMessage(), e);
-      return FeedRefreshResult.builder()
-          .hasNewEpisodes(false)
-          .newEpisodeCount(0)
-          .message("playlist sync failed: " + error)
-          .build();
+      throw new BusinessException("playlist sync failed: " + error);
     }
   }
 
