@@ -18,6 +18,7 @@ import java.time.ZonedDateTime;
 import java.time.format.DateTimeFormatter;
 import java.util.ArrayList;
 import java.util.List;
+import java.util.Objects;
 import java.io.IOException;
 import lombok.Builder;
 import lombok.Data;
@@ -91,6 +92,7 @@ public class AccountService {
   private final YtDlpRuntimeService ytDlpRuntimeService;
   private final YtDlpProxyService ytDlpProxyService;
   private final MediaPathProperties mediaPathProperties;
+  private final YoutubeQuotaService youtubeQuotaService;
 
   public AccountService(UserMapper userMapper, ChannelMapper channelMapper, EpisodeMapper episodeMapper,
       PlaylistMapper playlistMapper, MessageSource messageSource, ObjectMapper objectMapper,
@@ -102,7 +104,8 @@ public class AccountService {
       OutboundProxyHolder outboundProxyHolder,
       YtDlpRuntimeService ytDlpRuntimeService,
       YtDlpProxyService ytDlpProxyService,
-      MediaPathProperties mediaPathProperties) {
+      MediaPathProperties mediaPathProperties,
+      YoutubeQuotaService youtubeQuotaService) {
     this.userMapper = userMapper;
     this.channelMapper = channelMapper;
     this.episodeMapper = episodeMapper;
@@ -120,6 +123,7 @@ public class AccountService {
     this.ytDlpRuntimeService = ytDlpRuntimeService;
     this.ytDlpProxyService = ytDlpProxyService;
     this.mediaPathProperties = mediaPathProperties;
+    this.youtubeQuotaService = youtubeQuotaService;
   }
 
   /**
@@ -341,9 +345,19 @@ public class AccountService {
           messageSource.getMessage("user.not.found", null, LocaleContextHolder.getLocale()));
     }
 
+    String previousApiKey = systemConfigService.getYoutubeApiKey();
+    Integer previousLimit = systemConfigService.getYoutubeDailyLimitUnits();
     SystemConfig config = systemConfigService.updateYoutubeApiSettings(youtubeApiKey,
         youtubeDailyLimitUnits);
     YoutubeApiKeyHolder.updateYoutubeApiKey(config.getYoutubeApiKey());
+    boolean apiKeyChanged = StringUtils.hasText(config.getYoutubeApiKey())
+        && !Objects.equals(previousApiKey, config.getYoutubeApiKey());
+    boolean limitRelaxed = previousLimit != null
+        && (config.getYoutubeDailyLimitUnits() == null
+        || config.getYoutubeDailyLimitUnits() > previousLimit);
+    if (apiKeyChanged || limitRelaxed) {
+      youtubeQuotaService.clearAutoSyncBlockToday();
+    }
     return sanitizeSystemConfig(config);
   }
 
@@ -680,8 +694,8 @@ public class AccountService {
       proxyExecutionScope.callWithProxy(proxySettings, () -> {
         youtubeServiceFactory.createClient(proxySettings, requestInitializer)
             .videos()
-            .list("id")
-            .setId("dQw4w9WgXcQ")
+            .list(List.of("id"))
+            .setId(List.of("dQw4w9WgXcQ"))
             .setKey(youtubeApiKey)
             .execute();
         return null;

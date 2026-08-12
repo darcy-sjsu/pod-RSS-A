@@ -65,10 +65,17 @@ services:
       - '8834:8080'
     environment:
       - SPRING_DATASOURCE_URL=jdbc:sqlite:/data/pigeon-pod.db # set to your database path
+      - PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL=http://bgutil-provider:4416
       # Optional: disable PigeonPod built-in auth when running behind another auth layer
       # - PIGEON_AUTH_ENABLED=false
     volumes:
       - data:/data
+    depends_on:
+      - bgutil-provider
+
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
+    restart: unless-stopped
 
 volumes:
   data:
@@ -89,7 +96,10 @@ Open your browser and visit `http://localhost:8834` with **default username: `ro
 
 ### Run with JAR
 
-**Make sure you have Java 17+ and yt-dlp installed on your machine.**
+**Make sure you have Java 17+, yt-dlp, FFmpeg, and Deno 2.3+ installed on your machine.**
+
+For current YouTube playback restrictions, install a supported PO Token provider plugin and
+configure `PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL` when using an HTTP provider.
 
 1. Build the JAR from source, see [Local Development](#local-development)
 
@@ -157,6 +167,8 @@ Design and architecture documents live in `dev-docs/`.
 - Maven 3.9+
 - SQLite
 - yt-dlp
+- FFmpeg
+- Deno 2.3+ (required by current yt-dlp YouTube extraction)
 
 ### Local Development
 
@@ -168,7 +180,12 @@ cd pigeon-pod
 2. Configure database
 ```bash
 # Create data directory
-mkdir -p data/audio
+mkdir -p data/audio data/video data/cover
+
+# The default runtime paths target /data for containers. For local development:
+export PIGEON_AUDIO_FILE_PATH="$PWD/data/audio/"
+export PIGEON_VIDEO_FILE_PATH="$PWD/data/video/"
+export PIGEON_COVER_FILE_PATH="$PWD/data/cover/"
 
 # Database file will be created automatically on first startup
 ```

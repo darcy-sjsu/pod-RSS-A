@@ -12,7 +12,7 @@ COPY backend/pom.xml .
 COPY backend/src ./src
 # copy the frontend build output to the backend resources
 COPY --from=frontend-build /app/dist ./src/main/resources/static
-RUN mvn clean package -DskipTests
+RUN mvn clean package
 
 # Final runtime image
 FROM cgr.dev/chainguard/wolfi-base:latest
@@ -25,7 +25,7 @@ RUN apk add --update --no-cache \
     py3-pip \
     sqlite \
     deno \
-    && pip3 install --no-cache-dir "yt-dlp[default,curl-cffi]"
+    && pip3 install --no-cache-dir "yt-dlp[default,curl-cffi]" "bgutil-ytdlp-pot-provider==1.3.1"
 RUN mkdir -p /data/logs /tmp/pigeon-pod
 
 WORKDIR /app

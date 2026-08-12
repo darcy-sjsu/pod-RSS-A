@@ -118,6 +118,9 @@ public interface PlaylistEpisodeMapper extends BaseMapper<PlaylistEpisode> {
   int countByPlaylistAndEpisode(@Param("playlistId") String playlistId,
       @Param("episodeId") String episodeId);
 
+  @Select("SELECT COUNT(1) FROM playlist_episode WHERE episode_id = #{episodeId}")
+  int countByEpisodeId(@Param("episodeId") String episodeId);
+
   @Insert("INSERT INTO playlist_episode (playlist_id, episode_id, position, published_at, "
       + "source_channel_id, source_channel_name, source_channel_url) "
       + "VALUES (#{playlistId}, #{episodeId}, #{position}, #{publishedAt}, #{sourceChannelId}, "

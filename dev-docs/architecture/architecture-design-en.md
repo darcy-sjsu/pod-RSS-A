@@ -127,7 +127,7 @@ PigeonPod is a self-hosted YouTube-to-Podcast bridge. The core goals are:
 ### 7.2 Sync and History Backfill
 
 - Incremental sync through `refreshChannel` / `refreshPlaylist`:
-  - channel: latest-page scan + DB diff.
+  - channel: page from the newest uploads until `lastSyncVideoId`, then apply the DB diff, preventing gaps when more than 50 uploads arrive between runs.
   - playlist: when the configured sync interval is due, full scan + DB diff, plus mapping/order refresh.
 - History backfill via `/api/feed/{type}/history/{id}`:
   - backend fetches older pages and persists metadata.
@@ -137,13 +137,14 @@ PigeonPod is a self-hosted YouTube-to-Podcast bridge. The core goals are:
 
 1. Downloadable episodes (auto or manual) emit `EpisodesCreatedEvent`.
 2. `DownloadTaskHelper.submitDownloadTask`:
-   - `TaskStatusHelper.tryMarkDownloading` (`REQUIRES_NEW`) transitions `READY/PENDING/FAILED -> DOWNLOADING`
+   - `TaskStatusHelper.tryMarkDownloading` (`REQUIRES_NEW`) atomically transitions `READY/PENDING/FAILED -> DOWNLOADING` with a conditional database update
    - submits `DownloadHandler.download`.
 3. `DownloadHandler`:
    - resolves feed context and effective defaults
    - derives the download output basename from the system-level file naming pattern, then builds the yt-dlp command (media mode, quality, encoding, subtitles, chapters, custom args)
    - enforces a timeout on the main yt-dlp process, terminates the process tree on timeout, and handles it as a failed download
    - persists `mediaFilePath/mediaType/errorLog/retryNumber/downloadStatus/downloadStartedAt`.
+   - `DownloadProcessRegistry` tracks each episode process for active cancellation, stale recovery, and shutdown cleanup.
 4. `DownloadScheduler` keeps worker slots filled, recovers timed-out `DOWNLOADING` rows, and drives failed-download retry by `nextRetryAt`.
 
 ### 7.4 Delayed Auto-Download
@@ -195,6 +196,7 @@ PigeonPod is a self-hosted YouTube-to-Podcast bridge. The core goals are:
   - `stable/nightly` channel update
   - version retention and rollback
   - fallback to system `yt-dlp` binary when managed runtime is unavailable.
+- Docker Compose starts a bgutil PO Token provider sidecar by default; both image and managed runtimes install its yt-dlp plugin.
 - Frontend dev proxies `/api` and `/media` to `localhost:8080` via `vite.config.js`.
 
 ## 11. Extension Guidelines

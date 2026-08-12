@@ -92,7 +92,10 @@ const FeedDetail = () => {
   const [confirmDeleteFeedOpened, { open: openConfirmDeleteFeed, close: closeConfirmDeleteFeed }] =
     useDisclosure(false);
   const [deleting, setDeleting] = useState(false);
-  const [editConfigOpened, { open: openEditConfig, close: closeEditConfig }] = useDisclosure(false);
+  const [editConfigOpened, { open: openEditConfigModal, close: closeEditConfig }] =
+    useDisclosure(false);
+  const [editingFeed, setEditingFeed] = useState(null);
+  const [configSaving, setConfigSaving] = useState(false);
   const [copyModalOpened, { open: openCopyModal, close: closeCopyModal }] = useDisclosure(false);
   const [copyText, setCopyText] = useState('');
   const [
@@ -249,27 +252,46 @@ const FeedDetail = () => {
 
   // Update feed config
   const updateFeedConfig = async () => {
-    const res = await API.put(`/api/feed/${type}/config/${feedId}`, feed);
-    const { code, msg, data } = res.data;
+    if (configSaving || !editingFeed) return;
+    setConfigSaving(true);
+    try {
+      const res = await API.put(`/api/feed/${type}/config/${feedId}`, editingFeed);
+      const { code, msg, data } = res.data;
 
-    if (code !== 200) {
-      showError(msg || t('update_channel_config_failed'));
-      return;
+      if (code !== 200) {
+        showError(msg || t('update_channel_config_failed'));
+        return;
+      }
+
+      if (data.downloadHistory) {
+        showSuccess(t('channel_config_updated_and_add_history_episodes_task_submitted'));
+      } else {
+        showSuccess(t('channel_config_updated'));
+      }
+
+      await reloadFeedAndEpisodes();
+
+      if (batchDownloadModalOpened) {
+        setBatchCurrentPage(1);
+        await fetchBatchEpisodes(1);
+      }
+
+      setEditingFeed(null);
+      closeEditConfig();
+    } catch {
+      // The shared API interceptor displays the request error.
+    } finally {
+      setConfigSaving(false);
     }
+  };
 
-    if (data.downloadHistory) {
-      showSuccess(t('channel_config_updated_and_add_history_episodes_task_submitted'));
-    } else {
-      showSuccess(t('channel_config_updated'));
-    }
+  const openEditConfig = () => {
+    setEditingFeed(feed ? { ...feed } : null);
+    openEditConfigModal();
+  };
 
-    await reloadFeedAndEpisodes();
-
-    if (batchDownloadModalOpened) {
-      setBatchCurrentPage(1);
-      await fetchBatchEpisodes(1);
-    }
-
+  const cancelEditConfig = () => {
+    setEditingFeed(null);
     closeEditConfig();
   };
 
@@ -1252,7 +1274,8 @@ const FeedDetail = () => {
                               {t('retry')}
                             </Button>
                           ) : null}
-                          {isAdmin && episode.downloadStatus === 'PENDING' ? (
+                          {isAdmin &&
+                          ['PENDING', 'DOWNLOADING'].includes(episode.downloadStatus) ? (
                             <Button
                               size="compact-xs"
                               variant="outline"
@@ -1504,10 +1527,10 @@ const FeedDetail = () => {
 
       <EditFeedModal
         opened={editConfigOpened}
-        onClose={closeEditConfig}
+        onClose={cancelEditConfig}
         title={t('edit_channel_configuration')}
-        feed={feed}
-        onFeedChange={setFeed}
+        feed={editingFeed || feed}
+        onFeedChange={setEditingFeed}
         isPlaylist={isPlaylist}
         size="lg"
         autoDownloadLimitField={
@@ -1515,17 +1538,19 @@ const FeedDetail = () => {
             label={t('auto_download_limit')}
             name="autoDownloadLimit"
             placeholder={t('3')}
-            value={feed?.autoDownloadLimit}
-            onChange={(value) => setFeed({ ...feed, autoDownloadLimit: value })}
-            disabled={feed?.autoDownloadEnabled === false}
+            value={editingFeed?.autoDownloadLimit}
+            onChange={(value) =>
+              setEditingFeed((current) => ({ ...current, autoDownloadLimit: value }))
+            }
+            disabled={editingFeed?.autoDownloadEnabled === false}
           />
         }
         actionButtons={
           <Group mt="md" justify="flex-end">
-            <Button variant="default" onClick={closeEditConfig}>
+            <Button variant="default" onClick={cancelEditConfig}>
               {t('cancel')}
             </Button>
-            <Button variant="filled" onClick={updateFeedConfig}>
+            <Button variant="filled" loading={configSaving} onClick={updateFeedConfig}>
               {t('save')}
             </Button>
           </Group>

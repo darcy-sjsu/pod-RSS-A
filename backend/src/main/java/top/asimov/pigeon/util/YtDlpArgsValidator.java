@@ -23,7 +23,15 @@ public final class YtDlpArgsValidator {
       "--ffmpeg-location",
       "--external-downloader",
       "--external-downloader-args",
-      "--batch-file"
+      "--batch-file",
+      "--format",
+      "-f",
+      "--no-cookies",
+      "--force-overwrites",
+      "--exec-before-download",
+      "--exec-after-download",
+      "--download-archive",
+      "--no-download-archive"
   );
 
   public static List<String> blockedArgs() {

@@ -22,11 +22,14 @@ import org.springframework.context.MessageSource;
 import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 import top.asimov.pigeon.config.DownloadProperties;
 import top.asimov.pigeon.config.StorageProperties;
 import top.asimov.pigeon.event.EpisodesCreatedEvent;
 import top.asimov.pigeon.exception.BusinessException;
+import top.asimov.pigeon.helper.DownloadProcessRegistry;
 import top.asimov.pigeon.mapper.ChannelMapper;
 import top.asimov.pigeon.mapper.EpisodeMapper;
 import top.asimov.pigeon.mapper.PlaylistEpisodeMapper;
@@ -56,12 +59,14 @@ public class EpisodeService {
   private final StorageProperties storageProperties;
   private final S3StorageService s3StorageService;
   private final DownloadProperties downloadProperties;
+  private final DownloadProcessRegistry downloadProcessRegistry;
 
   public EpisodeService(EpisodeMapper episodeMapper, ApplicationEventPublisher eventPublisher,
       MessageSource messageSource, ChannelMapper channelMapper,
       PlaylistEpisodeMapper playlistEpisodeMapper, PlaylistMapper playlistMapper,
       StorageProperties storageProperties,
-      S3StorageService s3StorageService, DownloadProperties downloadProperties) {
+      S3StorageService s3StorageService, DownloadProperties downloadProperties,
+      DownloadProcessRegistry downloadProcessRegistry) {
     this.episodeMapper = episodeMapper;
     this.eventPublisher = eventPublisher;
     this.messageSource = messageSource;
@@ -71,6 +76,7 @@ public class EpisodeService {
     this.storageProperties = storageProperties;
     this.s3StorageService = s3StorageService;
     this.downloadProperties = downloadProperties;
+    this.downloadProcessRegistry = downloadProcessRegistry;
   }
 
   public boolean isS3Mode() {
@@ -357,6 +363,11 @@ public class EpisodeService {
       if (episode == null || episode.getId() == null || episode.getDownloadStartedAt() == null) {
         continue;
       }
+      if (downloadProcessRegistry.terminate(episode.getId())) {
+        log.warn("[download] stale active process termination requested: episodeId={}",
+            episode.getId());
+        continue;
+      }
       episode.setMediaFilePath(null);
       episode.setMediaSizeBytes(null);
       episode.setMediaEtag(null);
@@ -612,6 +623,87 @@ public class EpisodeService {
     LambdaQueryWrapper<Episode> wrapper = new LambdaQueryWrapper<>();
     wrapper.eq(Episode::getChannelId, channelId);
     return episodeMapper.delete(wrapper);
+  }
+
+  /**
+   * Detaches episodes from a deleted channel while preserving episodes referenced by playlists.
+   * Orphan records are deleted transactionally; their external assets are removed only after commit.
+   */
+  @Transactional
+  public ChannelEpisodeDetachResult detachChannelEpisodes(String channelId) {
+    if (!StringUtils.hasText(channelId)) {
+      return new ChannelEpisodeDetachResult(0, 0);
+    }
+
+    List<Episode> channelEpisodes = findByChannelId(channelId);
+    if (channelEpisodes.isEmpty()) {
+      return new ChannelEpisodeDetachResult(0, 0);
+    }
+
+    int detachedCount = 0;
+    List<Episode> deletedOrphans = new ArrayList<>();
+    for (Episode episode : channelEpisodes) {
+      if (episode == null || !StringUtils.hasText(episode.getId())) {
+        continue;
+      }
+
+      if (playlistEpisodeMapper.countByEpisodeId(episode.getId()) > 0) {
+        detachedCount += episodeMapper.clearChannelId(episode.getId(), channelId);
+        continue;
+      }
+
+      if (episodeMapper.deleteById(episode.getId()) > 0) {
+        deletedOrphans.add(episode);
+      }
+    }
+
+    scheduleAssetCleanupAfterCommit(deletedOrphans);
+    return new ChannelEpisodeDetachResult(detachedCount, deletedOrphans.size());
+  }
+
+  private void scheduleAssetCleanupAfterCommit(List<Episode> deletedEpisodes) {
+    if (deletedEpisodes == null || deletedEpisodes.isEmpty()) {
+      return;
+    }
+
+    List<Episode> cleanupTargets = List.copyOf(deletedEpisodes);
+    Runnable cleanup = () -> cleanupTargets.forEach(this::deleteDetachedEpisodeAssetsQuietly);
+    if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+      cleanup.run();
+      return;
+    }
+
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+      @Override
+      public void afterCommit() {
+        cleanup.run();
+      }
+    });
+  }
+
+  private void deleteDetachedEpisodeAssetsQuietly(Episode episode) {
+    if (episode == null || !StringUtils.hasText(episode.getMediaFilePath())) {
+      return;
+    }
+
+    String mediaFilePath = episode.getMediaFilePath();
+    try {
+      if (isS3Mode()) {
+        deleteEpisodeAssetsByMediaPath(mediaFilePath);
+        return;
+      }
+      deleteSubtitleFiles(mediaFilePath);
+      deleteThumbnailFiles(mediaFilePath);
+      deleteChaptersFile(mediaFilePath, episode.getId());
+      Files.deleteIfExists(Paths.get(mediaFilePath));
+    } catch (Exception exception) {
+      log.error("[storage] detached channel episode asset cleanup failed: episodeId={} mediaFilePath={}",
+          episode.getId(), mediaFilePath, exception);
+    }
+  }
+
+  public record ChannelEpisodeDetachResult(int detachedCount, int deletedCount) {
+
   }
 
   /**
@@ -874,7 +966,7 @@ public class EpisodeService {
   }
 
   /**
-   * 取消PENDING状态的任务
+   * Cancels a queued or actively running download.
    */
   @Transactional
   public void cancelPendingEpisode(String episodeId) {
@@ -889,8 +981,10 @@ public class EpisodeService {
               LocaleContextHolder.getLocale()));
     }
 
-    // 状态校验：只允许取消 PENDING 状态的 Episode
-    if (!EpisodeStatus.PENDING.name().equals(episode.getDownloadStatus())) {
+    String downloadStatus = episode.getDownloadStatus();
+    boolean isPending = EpisodeStatus.PENDING.name().equals(downloadStatus);
+    boolean isDownloading = EpisodeStatus.DOWNLOADING.name().equals(downloadStatus);
+    if (!isPending && !isDownloading) {
       log.info("[download] pending download cancel rejected: episodeId={} status={} reason=invalidStatus",
           episodeId, episode.getDownloadStatus());
       throw new BusinessException(
@@ -899,7 +993,9 @@ public class EpisodeService {
               LocaleContextHolder.getLocale()));
     }
 
-    // 更新状态为 READY
+    if (isDownloading) {
+      downloadProcessRegistry.requestCancellation(episodeId);
+    }
     episodeMapper.updateDownloadStatusAndClearSchedulingFields(episodeId,
         EpisodeStatus.READY.name());
   }
@@ -968,8 +1064,10 @@ public class EpisodeService {
       throw new BusinessException("Delete operation only supports completed or failed episodes");
     }
 
-    if (action == EpisodeBatchAction.CANCEL && targetStatus != EpisodeStatus.PENDING) {
-      throw new BusinessException("Cancel operation only supports pending episodes");
+    if (action == EpisodeBatchAction.CANCEL
+        && targetStatus != EpisodeStatus.PENDING
+        && targetStatus != EpisodeStatus.DOWNLOADING) {
+      throw new BusinessException("Cancel operation only supports pending or downloading episodes");
     }
     if (action == EpisodeBatchAction.DOWNLOAD && targetStatus != EpisodeStatus.READY) {
       throw new BusinessException("Download operation only supports ready episodes");

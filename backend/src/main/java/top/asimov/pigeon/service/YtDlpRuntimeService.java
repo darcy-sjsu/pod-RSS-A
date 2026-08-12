@@ -298,6 +298,7 @@ public class YtDlpRuntimeService {
       command.add("--pre");
     }
     command.add("yt-dlp[default,curl-cffi]");
+    command.add("bgutil-ytdlp-pot-provider");
     command.add("--target");
     command.add(targetPath.toString());
 

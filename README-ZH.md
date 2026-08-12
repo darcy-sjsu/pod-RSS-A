@@ -64,10 +64,17 @@ services:
       - '8834:8080'
     environment:
       - SPRING_DATASOURCE_URL=jdbc:sqlite:/data/pigeon-pod.db
+      - PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL=http://bgutil-provider:4416
       # 可选：只有在你已使用其他可信认证层保护实例时，才关闭内置认证
       # - PIGEON_AUTH_ENABLED=false
     volumes:
       - data:/data
+    depends_on:
+      - bgutil-provider
+
+  bgutil-provider:
+    image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
+    restart: unless-stopped
 
 volumes:
   data:

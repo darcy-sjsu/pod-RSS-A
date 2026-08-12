@@ -5,8 +5,6 @@ import com.google.api.services.youtube.model.Channel;
 import com.google.api.services.youtube.model.ChannelListResponse;
 import com.google.api.services.youtube.model.Playlist;
 import com.google.api.services.youtube.model.PlaylistListResponse;
-import com.google.api.services.youtube.model.SearchListResponse;
-import com.google.api.services.youtube.model.SearchResult;
 import java.io.IOException;
 import java.util.List;
 import lombok.extern.slf4j.Slf4j;
@@ -14,7 +12,6 @@ import top.asimov.pigeon.config.ProxyExecutionScope;
 import org.springframework.context.MessageSource;
 import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.stereotype.Component;
-import org.springframework.util.CollectionUtils;
 import org.springframework.util.ObjectUtils;
 import org.springframework.util.StringUtils;
 import top.asimov.pigeon.config.YoutubeApiKeyHolder;
@@ -53,9 +50,8 @@ public class YoutubeHelper {
       // 直接使用频道 ID 获取信息
       return fetchYoutubeChannelByYoutubeChannelId(channelId);
     } else {
-      // 使用传统的 handle 搜索方式
-      String resolvedChannelId = fetchYoutubeChannelIdByUrl(input);
-      return fetchYoutubeChannelByYoutubeChannelId(resolvedChannelId);
+      ChannelLookup channelLookup = resolveChannelLookup(input);
+      return fetchYoutubeChannelByLookup(channelLookup);
     }
   }
 
@@ -93,10 +89,12 @@ public class YoutubeHelper {
       return normalizeVideoId(candidate);
     }
 
-    if (trimmed.contains("/shorts/")) {
-      int markerIndex = trimmed.indexOf("/shorts/");
-      String candidate = trimmed.substring(markerIndex + "/shorts/".length());
-      return normalizeVideoId(candidate);
+    for (String pathMarker : List.of("/shorts/", "/live/", "/embed/")) {
+      if (trimmed.contains(pathMarker)) {
+        int markerIndex = trimmed.indexOf(pathMarker);
+        String candidate = trimmed.substring(markerIndex + pathMarker.length());
+        return normalizeVideoId(candidate);
+      }
     }
 
     if (trimmed.contains("v=")) {
@@ -118,16 +116,51 @@ public class YoutubeHelper {
    * @param channelUrl 频道 URL
    * @return 提取的 handle，如果无法提取则返回 null
    */
-  private String getHandleFromUrl(String channelUrl) {
-    if (channelUrl == null || !channelUrl.contains("@")) {
+  String getHandleFromUrl(String channelUrl) {
+    if (!StringUtils.hasText(channelUrl)) {
       return null;
     }
-    int atIndex = channelUrl.lastIndexOf('@');
-    int slashIndex = channelUrl.indexOf('/', atIndex);
-    if (slashIndex > 0) {
-      return channelUrl.substring(atIndex + 1, slashIndex);
+    String normalized = channelUrl.trim();
+    if (normalized.startsWith("@")) {
+      return normalizeChannelAlias(normalized.substring(1));
     }
-    return channelUrl.substring(atIndex + 1);
+    int markerIndex = normalized.indexOf("/@");
+    if (markerIndex >= 0) {
+      return normalizeChannelAlias(normalized.substring(markerIndex + 2));
+    }
+    int customIndex = normalized.indexOf("/c/");
+    if (customIndex >= 0) {
+      return normalizeChannelAlias(normalized.substring(customIndex + 3));
+    }
+    return null;
+  }
+
+  String getUsernameFromUrl(String channelUrl) {
+    if (!StringUtils.hasText(channelUrl)) {
+      return null;
+    }
+    String normalized = channelUrl.trim();
+    int markerIndex = normalized.indexOf("/user/");
+    if (markerIndex < 0) {
+      return null;
+    }
+    return normalizeChannelAlias(normalized.substring(markerIndex + 6));
+  }
+
+  private String normalizeChannelAlias(String rawAlias) {
+    if (!StringUtils.hasText(rawAlias)) {
+      return null;
+    }
+    String normalized = rawAlias.trim();
+    int boundary = normalized.length();
+    for (char delimiter : new char[]{'/', '?', '#'}) {
+      int index = normalized.indexOf(delimiter);
+      if (index >= 0) {
+        boundary = Math.min(boundary, index);
+      }
+    }
+    String alias = normalized.substring(0, boundary).trim();
+    return StringUtils.hasText(alias) ? alias : null;
   }
 
   /**
@@ -271,8 +304,8 @@ public class YoutubeHelper {
 
         YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
         YouTube.Channels.List channelRequest = youtubeService.channels()
-            .list("snippet,statistics,brandingSettings");
-        channelRequest.setId(channelId);
+            .list(List.of("snippet", "statistics", "brandingSettings"));
+        channelRequest.setId(List.of(channelId));
         channelRequest.setKey(youtubeApiKey);
 
         log.info("[youtube-api] channels.list requested: part=snippet,statistics,brandingSettings channelId={}",
@@ -315,8 +348,8 @@ public class YoutubeHelper {
         String youtubeApiKey = YoutubeApiKeyHolder.requireYoutubeApiKey(messageSource);
 
         YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
-        YouTube.Playlists.List playlistRequest = youtubeService.playlists().list("snippet");
-        playlistRequest.setId(playlistId);
+        YouTube.Playlists.List playlistRequest = youtubeService.playlists().list(List.of("snippet"));
+        playlistRequest.setId(List.of(playlistId));
         playlistRequest.setKey(youtubeApiKey);
 
         log.info("[youtube-api] playlists.list requested: part=snippet playlistId={}", playlistId);
@@ -343,38 +376,41 @@ public class YoutubeHelper {
   }
 
   /**
-   * 使用频道 URL 或 handle 搜索并获取频道 ID
-   *
-   * @param channelUrl 频道 URL 或 handle
-   * @return 频道 ID
+   * Resolves an exact channel lookup supported by the YouTube channels API.
    */
-  private String fetchYoutubeChannelIdByUrl(String channelUrl) {
+  private ChannelLookup resolveChannelLookup(String channelUrl) {
+    String handle = getHandleFromUrl(channelUrl);
+    if (StringUtils.hasText(handle)) {
+      return new ChannelLookup(handle, ChannelLookupType.HANDLE);
+    }
+    String username = getUsernameFromUrl(channelUrl);
+    if (StringUtils.hasText(username)) {
+      return new ChannelLookup(username, ChannelLookupType.USERNAME);
+    }
+    throw new BusinessException(
+        messageSource.getMessage("youtube.invalid.url", null, LocaleContextHolder.getLocale()));
+  }
+
+  private Channel fetchYoutubeChannelByLookup(ChannelLookup lookup) {
     try {
       return proxyExecutionScope.callWithCurrentProxy(() -> {
         String youtubeApiKey = YoutubeApiKeyHolder.requireYoutubeApiKey(messageSource);
-
-        String handle = getHandleFromUrl(channelUrl);
-        if (handle == null) {
-          throw new BusinessException(
-              messageSource.getMessage("youtube.invalid.url", null, LocaleContextHolder.getLocale()));
-        }
-
         YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
-        YouTube.Search.List searchListRequest = youtubeService.search()
-            .list("snippet")
-            .setQ(handle)
-            .setType("channel")
-            .setMaxResults(1L);
-
-        searchListRequest.setKey(youtubeApiKey);
-        log.info("[youtube-api] search.list requested: part=snippet query={} type=channel", handle);
-        SearchListResponse response = youtubeApiExecutor.execute(
-            YoutubeApiMethod.SEARCH_LIST,
-            searchListRequest::execute);
-        List<SearchResult> searchResults = response.getItems();
-
-        if (!CollectionUtils.isEmpty(searchResults)) {
-          return searchResults.get(0).getSnippet().getChannelId();
+        YouTube.Channels.List request = youtubeService.channels()
+            .list(List.of("snippet", "statistics", "brandingSettings"))
+            .setKey(youtubeApiKey);
+        if (lookup.type() == ChannelLookupType.HANDLE) {
+          request.setForHandle(lookup.value());
+        } else {
+          request.setForUsername(lookup.value());
+        }
+        log.info("[youtube-api] channels.list requested: part=snippet,statistics,brandingSettings lookupType={}",
+            lookup.type());
+        ChannelListResponse response = youtubeApiExecutor.execute(
+            YoutubeApiMethod.CHANNELS_LIST,
+            request::execute);
+        if (!ObjectUtils.isEmpty(response.getItems())) {
+          return response.getItems().get(0);
         }
         throw new BusinessException(messageSource.getMessage("youtube.channel.not.found", null,
             LocaleContextHolder.getLocale()));
@@ -405,6 +441,15 @@ public class YoutubeHelper {
     return trimmed.length() == 24 &&
         trimmed.startsWith("UC") &&
         trimmed.matches("^[A-Za-z0-9_-]{24}$");
+  }
+
+  private enum ChannelLookupType {
+    HANDLE,
+    USERNAME
+  }
+
+  private record ChannelLookup(String value, ChannelLookupType type) {
+
   }
 
 }

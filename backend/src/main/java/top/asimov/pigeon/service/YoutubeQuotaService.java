@@ -79,6 +79,14 @@ public class YoutubeQuotaService {
     dailyUsageMapper.blockAutoSync(usageDatePt, BLOCK_REASON_REMOTE_LIMIT);
   }
 
+  @Transactional
+  public void clearAutoSyncBlockToday() {
+    String usageDatePt = todayPtString();
+    dailyUsageMapper.ensureDayRow(usageDatePt);
+    dailyUsageMapper.clearAutoSyncBlock(usageDatePt);
+    log.info("[youtube-api] auto sync quota block cleared: date={}", usageDatePt);
+  }
+
   public boolean isAutoSyncBlockedToday() {
     YoutubeApiDailyUsage usage = dailyUsageMapper.selectByDate(todayPtString());
     return usage != null && usage.getAutoSyncBlocked() != null && usage.getAutoSyncBlocked() == 1;
@@ -99,7 +107,9 @@ public class YoutubeQuotaService {
     boolean warningReached = false;
     if (hasDailyLimit(dailyLimitUnits)) {
       remainingUnits = Math.max(0, dailyLimitUnits - usedUnits);
-      warningReached = usedUnits >= Math.ceil(dailyLimitUnits * 0.8);
+      warningReached = autoSyncBlocked || usedUnits >= Math.ceil(dailyLimitUnits * 0.8);
+    } else if (autoSyncBlocked) {
+      warningReached = true;
     }
 
     List<YoutubeQuotaMethodUsageResponse> breakdown;

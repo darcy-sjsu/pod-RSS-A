@@ -80,8 +80,13 @@ function isValidFeedSource(source) {
 
   const isYouTubeHandleUrl =
     /^https?:\/\/(?:www\.|m\.)?youtube\.com\/@[^/?#\s]+(?:[/?#].*)?$/i.test(trimmed);
+  const isYouTubeBareHandle = /^@[^/?#\s]+$/i.test(trimmed);
   const isYouTubeChannelUrl =
     /^https?:\/\/(?:www\.|m\.)?youtube\.com\/channel\/UC[A-Za-z0-9_-]{22}(?:[/?#].*)?$/i.test(
+      trimmed,
+    );
+  const isYouTubeLegacyChannelUrl =
+    /^https?:\/\/(?:www\.|m\.)?youtube\.com\/(?:c|user)\/[^/?#\s]+(?:[/?#].*)?$/i.test(
       trimmed,
     );
   const isYouTubeChannelId = /^UC[A-Za-z0-9_-]{22}$/.test(trimmed);
@@ -100,16 +105,25 @@ function isValidFeedSource(source) {
     );
   const isYouTubeShortUrl =
     /^https?:\/\/youtu\.be\/[A-Za-z0-9_-]{11}(?:[/?#].*)?$/i.test(trimmed);
+  const isYouTubeAlternateVideoUrl =
+    /^https?:\/\/(?:www\.|m\.)?youtube\.com\/(?:live|embed)\/[A-Za-z0-9_-]{11}(?:[/?#].*)?$/i.test(
+      trimmed,
+    );
+  const isYouTubeVideoId = /^[A-Za-z0-9_-]{11}$/.test(trimmed);
 
   return (
     isYouTubeHandleUrl ||
+    isYouTubeBareHandle ||
     isYouTubeChannelUrl ||
+    isYouTubeLegacyChannelUrl ||
     isYouTubeChannelId ||
     isYouTubePlaylistUrl ||
     isYouTubePlaylistId ||
     isYouTubeVideoUrl ||
     isYouTubeShortsUrl ||
-    isYouTubeShortUrl
+    isYouTubeShortUrl ||
+    isYouTubeAlternateVideoUrl ||
+    isYouTubeVideoId
   );
 }
 
@@ -190,12 +204,13 @@ const Home = () => {
   const [feed, setFeed] = useState({});
   const [episodes, setEpisodes] = useState([]);
   const [feeds, setFeeds] = useState([]);
-  const [preview, setPreview] = useState(false);
   const [opened, { open, close }] = useDisclosure(false);
   const [invalidSourceOpened, { open: openInvalidSourceModal, close: closeInvalidSourceModal }] =
     useDisclosure(false);
   const [sourceFormatModalScene, setSourceFormatModalScene] = useState('guide');
-  const [editConfigOpened, { open: openEditConfig, close: closeEditConfig }] = useDisclosure(false);
+  const [editConfigOpened, { open: openEditConfigModal, close: closeEditConfig }] =
+    useDisclosure(false);
+  const [editingFeed, setEditingFeed] = useState(null);
   const [mobileNewFeedOpen, setMobileNewFeedOpen] = useState(false);
   const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
   const [mobileFeedSearch, setMobileFeedSearch] = useState('');
@@ -265,6 +280,7 @@ const Home = () => {
   };
 
   const fetchFeed = async () => {
+    if (fetchFeedLoading) return;
     if (!feedSource) {
       showError(t('please_enter_valid_feed_url'));
       return;
@@ -276,73 +292,93 @@ const Home = () => {
     }
 
     setFetchFeedLoading(true);
-    const res = await API.post('/api/feed/fetch', {
-      source: normalizedFeedSource,
-    });
-    const { code, msg, data } = res.data;
-    if (code !== 200) {
-      if (shouldShowSourceFormatModal(msg)) {
-        openSourceFormatGuideModal();
-      } else {
-        showError(msg);
+    try {
+      const res = await API.post('/api/feed/fetch', {
+        source: normalizedFeedSource,
+      });
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        if (shouldShowSourceFormatModal(msg)) {
+          openSourceFormatGuideModal();
+        } else {
+          showError(msg);
+        }
+        return;
       }
+
+      setMobileNewFeedOpen(false);
+      open();
+
+      setFeed(data.feed);
+      setEpisodes(data.episodes || []);
+
+      setFeedSource('');
+    } catch {
+      // The shared API interceptor displays the request error.
+    } finally {
       setFetchFeedLoading(false);
-      return;
     }
-
-    setMobileNewFeedOpen(false);
-    open();
-
-    setFeed(data.feed);
-    setEpisodes(data.episodes || []);
-
-    setFetchFeedLoading(false);
-    setFeedSource(''); // Clear the input field after successful addition
   };
 
   const addFeed = async () => {
+    if (addFeedLoading) return;
     const currentType = String(feed?.type || 'CHANNEL').toLowerCase();
     setAddFeedLoading(true);
-    const res = await API.post(`/api/feed/${currentType}/add`, feed);
-    const { code, msg, data } = res.data;
-    if (code !== 200) {
-      showError(msg);
+    try {
+      const res = await API.post(`/api/feed/${currentType}/add`, feed);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+
+      showSuccess(data.message);
+
+      setFeeds((prevFeeds) => {
+        const nextFeeds = prevFeeds.filter(
+          (feedItem) => !(feedItem?.id === data.feed?.id && feedItem?.type === data.feed?.type),
+        );
+        return [data.feed, ...nextFeeds];
+      });
+      setFeed(data.feed);
+
+      close();
+    } catch {
+      // The shared API interceptor displays the request error.
+    } finally {
       setAddFeedLoading(false);
-      return;
     }
-
-    showSuccess(data.message);
-
-    // Add the new feed at the beginning of the feeds list
-    setFeeds((prevFeeds) => {
-      const nextFeeds = prevFeeds.filter(
-        (feedItem) => !(feedItem?.id === data.feed?.id && feedItem?.type === data.feed?.type),
-      );
-      return [data.feed, ...nextFeeds];
-    });
-    setFeed(data.feed);
-
-    setAddFeedLoading(false);
-    close();
   };
 
   const previewFeed = async () => {
-    if (!preview) {
-      closeEditConfig();
-      return;
-    }
+    if (filterLoading || !editingFeed) return;
     setFilterLoading(true);
-    const currentType = String(feed?.type || 'CHANNEL').toLowerCase();
-    const res = await API.post(`/api/feed/${currentType}/preview`, feed);
-    const { code, msg, data } = res.data;
-    if (code !== 200) {
-      showError(msg);
+    try {
+      const currentType = String(editingFeed?.type || 'CHANNEL').toLowerCase();
+      const res = await API.post(`/api/feed/${currentType}/preview`, editingFeed);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      setFeed(data.feed || editingFeed);
+      setEpisodes(data.episodes || []);
+      setEditingFeed(null);
+      closeEditConfig();
+    } catch {
+      // The shared API interceptor displays the request error.
+    } finally {
       setFilterLoading(false);
-      return;
     }
-    setFeed(data.feed || feed);
-    setEpisodes(data.episodes || []);
-    setFilterLoading(false);
+  };
+
+  const openEditConfig = () => {
+    setEditingFeed({ ...feed });
+    openEditConfigModal();
+  };
+
+  const cancelEditConfig = () => {
+    setEditingFeed(null);
     closeEditConfig();
   };
 
@@ -477,11 +513,27 @@ const Home = () => {
         },
       ],
     },
+    {
+      key: 'youtube_video_url',
+      label: t('feed_source_format_youtube_video_url', {
+        defaultValue: 'YouTube video or Shorts',
+      }),
+      examples: [
+        {
+          label: t('feed_source_example_video_url', { defaultValue: 'Video URL' }),
+          value: 'https://www.youtube.com/watch?v=dQw4w9WgXcQ',
+        },
+        {
+          label: t('feed_source_example_video_id', { defaultValue: 'Video ID' }),
+          value: 'dQw4w9WgXcQ',
+        },
+      ],
+    },
   ];
 
   return (
     <Container size="lg" mt="lg">
-      {youtubeQuotaToday?.warningReached ? (
+      {youtubeQuotaToday?.warningReached || youtubeQuotaToday?.autoSyncBlocked ? (
         <Alert color="red" variant="light" mb="md" icon={<IconAlertCircle size={18} />}>
           <Text size="sm">
             {youtubeQuotaToday.autoSyncBlocked
@@ -575,7 +627,7 @@ const Home = () => {
             placeholder={t('enter_feed_source_url')}
             name="feedSource"
             value={feedSource}
-            onChange={(e) => setFeedSource(decodeURIComponent(e.target.value))}
+            onChange={(e) => setFeedSource(e.target.value)}
             style={{ flex: 1, minWidth: 0 }}
           />
           <Button
@@ -640,7 +692,7 @@ const Home = () => {
                 placeholder={t('enter_feed_source_url')}
                 name="feedSource"
                 value={feedSource}
-                onChange={(e) => setFeedSource(decodeURIComponent(e.target.value))}
+                onChange={(e) => setFeedSource(e.target.value)}
                 style={{ flex: 1, minWidth: 0 }}
               />
               <Group justify="space-between" grow>
@@ -814,26 +866,27 @@ const Home = () => {
       </Modal>
       <EditFeedModal
         opened={editConfigOpened}
-        onClose={closeEditConfig}
+        onClose={cancelEditConfig}
         title={t('edit_feed_configuration')}
-        feed={feed}
-        onFeedChange={setFeed}
+        feed={editingFeed || feed}
+        onFeedChange={setEditingFeed}
         isPlaylist={isPlaylistFeed}
-        onPreview={() => setPreview(true)}
         size="lg"
         autoDownloadLimitField={
           <NumberInput
             label={t('auto_download_limit')}
             name="autoDownloadLimit"
             placeholder={t('3')}
-            value={feed.autoDownloadLimit}
-            onChange={(value) => setFeed({ ...feed, autoDownloadLimit: value })}
-            disabled={feed?.autoDownloadEnabled === false}
+            value={editingFeed?.autoDownloadLimit}
+            onChange={(value) =>
+              setEditingFeed((current) => ({ ...current, autoDownloadLimit: value }))
+            }
+            disabled={editingFeed?.autoDownloadEnabled === false}
           />
         }
         actionButtons={
           <Group mt="md" justify={'flex-end'}>
-            <Button variant="default" onClick={closeEditConfig}>
+            <Button variant="default" onClick={cancelEditConfig}>
               {t('cancel')}
             </Button>
             <Button variant="filled" loading={filterLoading} onClick={previewFeed}>

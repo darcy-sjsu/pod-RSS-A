@@ -1,10 +1,14 @@
 package top.asimov.pigeon.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.lenient;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import java.util.List;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -13,6 +17,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.MessageSource;
 import top.asimov.pigeon.config.AppBaseUrlResolver;
+import top.asimov.pigeon.exception.BusinessException;
 import top.asimov.pigeon.helper.YoutubeChannelHelper;
 import top.asimov.pigeon.helper.YoutubeHelper;
 import top.asimov.pigeon.mapper.ChannelMapper;
@@ -55,7 +60,8 @@ class ChannelServiceTest {
         messageSource,
         feedDefaultsService,
         appBaseUrlResolver);
-    when(messageSource.getMessage(any(), any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
+    lenient().when(messageSource.getMessage(any(), any(), any()))
+        .thenAnswer(invocation -> invocation.getArgument(0));
   }
 
   @Test
@@ -71,5 +77,52 @@ class ChannelServiceTest {
 
     assertEquals(FeedSource.YOUTUBE.name(), channel.getSource());
     verify(channelMapper).insert(channel);
+  }
+
+  @Test
+  void deletesChannelWithoutDeletingPlaylistOwnedEpisodes() {
+    Channel channel = Channel.builder().id("channel").title("Channel").build();
+    when(channelMapper.selectById("channel")).thenReturn(channel);
+    when(episodeService.detachChannelEpisodes("channel"))
+        .thenReturn(new EpisodeService.ChannelEpisodeDetachResult(2, 1));
+    when(channelMapper.deleteById("channel")).thenReturn(1);
+
+    channelService.deleteChannel("channel");
+
+    verify(episodeService).detachChannelEpisodes("channel");
+    verify(channelMapper).deleteById("channel");
+    verify(episodeService, never()).deleteEpisodesByChannelId("channel");
+  }
+
+  @Test
+  void incrementallyFetchesUntilLastSynchronizedVideo() {
+    Channel channel = Channel.builder()
+        .id("channel")
+        .title("Channel")
+        .lastSyncVideoId("last-synchronized")
+        .build();
+    when(youtubeChannelHelper.fetchYoutubeChannelVideos(
+        "channel", Integer.MAX_VALUE, "last-synchronized",
+        null, null, null, null, null, null)).thenReturn(List.of());
+    when(channelMapper.updateById(channel)).thenReturn(1);
+
+    channelService.refreshChannel(channel);
+
+    verify(youtubeChannelHelper).fetchYoutubeChannelVideos(
+        "channel", Integer.MAX_VALUE, "last-synchronized",
+        null, null, null, null, null, null);
+  }
+
+  @Test
+  void rejectsDuplicateChannelSubscription() {
+    Channel channel = Channel.builder()
+        .id("channel")
+        .title("Channel")
+        .autoDownloadEnabled(Boolean.FALSE)
+        .build();
+    when(channelMapper.selectById("channel")).thenReturn(channel);
+
+    assertThrows(BusinessException.class, () -> channelService.saveChannel(channel));
+    verify(channelMapper, never()).insert(channel);
   }
 }

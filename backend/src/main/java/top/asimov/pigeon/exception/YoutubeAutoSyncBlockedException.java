@@ -1,8 +1,8 @@
 package top.asimov.pigeon.exception;
 
-public class YoutubeAutoSyncBlockedException extends RuntimeException {
+public class YoutubeAutoSyncBlockedException extends BusinessException {
 
   public YoutubeAutoSyncBlockedException(String message) {
-    super(message);
+    super(429, message);
   }
 }
