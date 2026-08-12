@@ -20,8 +20,8 @@ public interface PlaylistMapper extends BaseMapper<Playlist> {
   @Select("SELECT p.* FROM playlist p "
       + "INNER JOIN playlist_episode pe ON p.id = pe.playlist_id "
       + "WHERE pe.episode_id = #{episodeId} "
-      + "ORDER BY pe.published_at DESC, pe.id DESC LIMIT 1")
-  Playlist selectLatestByEpisodeId(String episodeId);
+      + "ORDER BY p.id ASC LIMIT 1")
+  Playlist selectCanonicalByEpisodeId(String episodeId);
 
   /**
    * 查询已完成下载数量超过 maximumEpisodes 的播放列表统计信息。 仅统计 download_status = 'COMPLETED' 的节目数量。

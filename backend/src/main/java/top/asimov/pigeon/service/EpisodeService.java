@@ -22,6 +22,8 @@ import org.springframework.context.MessageSource;
 import org.springframework.context.i18n.LocaleContextHolder;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+import org.springframework.transaction.support.TransactionSynchronization;
+import org.springframework.transaction.support.TransactionSynchronizationManager;
 import org.springframework.util.StringUtils;
 import top.asimov.pigeon.config.DownloadProperties;
 import top.asimov.pigeon.config.StorageProperties;
@@ -612,6 +614,87 @@ public class EpisodeService {
     LambdaQueryWrapper<Episode> wrapper = new LambdaQueryWrapper<>();
     wrapper.eq(Episode::getChannelId, channelId);
     return episodeMapper.delete(wrapper);
+  }
+
+  /**
+   * Detaches episodes from a deleted channel while preserving episodes referenced by playlists.
+   * Orphan records are deleted transactionally; their external assets are removed only after commit.
+   */
+  @Transactional
+  public ChannelEpisodeDetachResult detachChannelEpisodes(String channelId) {
+    if (!StringUtils.hasText(channelId)) {
+      return new ChannelEpisodeDetachResult(0, 0);
+    }
+
+    List<Episode> channelEpisodes = findByChannelId(channelId);
+    if (channelEpisodes.isEmpty()) {
+      return new ChannelEpisodeDetachResult(0, 0);
+    }
+
+    int detachedCount = 0;
+    List<Episode> deletedOrphans = new ArrayList<>();
+    for (Episode episode : channelEpisodes) {
+      if (episode == null || !StringUtils.hasText(episode.getId())) {
+        continue;
+      }
+
+      if (playlistEpisodeMapper.countByEpisodeId(episode.getId()) > 0) {
+        detachedCount += episodeMapper.clearChannelId(episode.getId(), channelId);
+        continue;
+      }
+
+      if (episodeMapper.deleteById(episode.getId()) > 0) {
+        deletedOrphans.add(episode);
+      }
+    }
+
+    scheduleAssetCleanupAfterCommit(deletedOrphans);
+    return new ChannelEpisodeDetachResult(detachedCount, deletedOrphans.size());
+  }
+
+  private void scheduleAssetCleanupAfterCommit(List<Episode> deletedEpisodes) {
+    if (deletedEpisodes == null || deletedEpisodes.isEmpty()) {
+      return;
+    }
+
+    List<Episode> cleanupTargets = List.copyOf(deletedEpisodes);
+    Runnable cleanup = () -> cleanupTargets.forEach(this::deleteDetachedEpisodeAssetsQuietly);
+    if (!TransactionSynchronizationManager.isActualTransactionActive()) {
+      cleanup.run();
+      return;
+    }
+
+    TransactionSynchronizationManager.registerSynchronization(new TransactionSynchronization() {
+      @Override
+      public void afterCommit() {
+        cleanup.run();
+      }
+    });
+  }
+
+  private void deleteDetachedEpisodeAssetsQuietly(Episode episode) {
+    if (episode == null || !StringUtils.hasText(episode.getMediaFilePath())) {
+      return;
+    }
+
+    String mediaFilePath = episode.getMediaFilePath();
+    try {
+      if (isS3Mode()) {
+        deleteEpisodeAssetsByMediaPath(mediaFilePath);
+        return;
+      }
+      deleteSubtitleFiles(mediaFilePath);
+      deleteThumbnailFiles(mediaFilePath);
+      deleteChaptersFile(mediaFilePath, episode.getId());
+      Files.deleteIfExists(Paths.get(mediaFilePath));
+    } catch (Exception exception) {
+      log.error("[storage] detached channel episode asset cleanup failed: episodeId={} mediaFilePath={}",
+          episode.getId(), mediaFilePath, exception);
+    }
+  }
+
+  public record ChannelEpisodeDetachResult(int detachedCount, int deletedCount) {
+
   }
 
   /**

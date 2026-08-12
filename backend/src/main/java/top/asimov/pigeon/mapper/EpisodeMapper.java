@@ -30,6 +30,10 @@ public interface EpisodeMapper extends BaseMapper<Episode> {
   void updateChannelIdIfMissing(@Param("episodeId") String episodeId,
       @Param("channelId") String channelId);
 
+  @Update("update episode set channel_id = null "
+      + "where id = #{episodeId} and channel_id = #{channelId}")
+  int clearChannelId(@Param("episodeId") String episodeId, @Param("channelId") String channelId);
+
   @Update("update episode set download_status = #{downloadStatus}, auto_download_after = null, "
       + "next_retry_at = null, failure_notified_at = null, download_started_at = null "
       + "where id = #{id} and download_status = 'READY' "

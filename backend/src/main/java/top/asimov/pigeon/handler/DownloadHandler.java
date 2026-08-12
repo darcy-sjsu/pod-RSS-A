@@ -883,16 +883,16 @@ public class DownloadHandler {
     FeedDefaults defaults = feedDefaultsService.getEffectiveFeedDefaults();
     List<String> ytDlpArgs = parseYtDlpArgs(systemConfigService.getYtDlpArgs());
 
-    // 优先从 Playlist 获取配置
-    Playlist playlist = playlistMapper.selectLatestByEpisodeId(episode.getId());
-    if (playlist != null) {
-      return buildFeedContext(playlist, defaults, ytDlpArgs);
-    }
-
-    // 从 Channel 获取配置
+    // A channel is the canonical owner when an episode is shared by a channel and playlists.
     Channel channel = channelMapper.selectById(episode.getChannelId());
     if (channel != null) {
       return buildFeedContext(channel, defaults, ytDlpArgs);
+    }
+
+    // Playlist-only episodes use a stable canonical playlist selected by the mapper.
+    Playlist playlist = playlistMapper.selectCanonicalByEpisodeId(episode.getId());
+    if (playlist != null) {
+      return buildFeedContext(playlist, defaults, ytDlpArgs);
     }
 
     // 兜底返回默认配置

@@ -2,6 +2,7 @@ package top.asimov.pigeon.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -71,5 +72,20 @@ class ChannelServiceTest {
 
     assertEquals(FeedSource.YOUTUBE.name(), channel.getSource());
     verify(channelMapper).insert(channel);
+  }
+
+  @Test
+  void deletesChannelWithoutDeletingPlaylistOwnedEpisodes() {
+    Channel channel = Channel.builder().id("channel").title("Channel").build();
+    when(channelMapper.selectById("channel")).thenReturn(channel);
+    when(episodeService.detachChannelEpisodes("channel"))
+        .thenReturn(new EpisodeService.ChannelEpisodeDetachResult(2, 1));
+    when(channelMapper.deleteById("channel")).thenReturn(1);
+
+    channelService.deleteChannel("channel");
+
+    verify(episodeService).detachChannelEpisodes("channel");
+    verify(channelMapper).deleteById("channel");
+    verify(episodeService, never()).deleteEpisodesByChannelId("channel");
   }
 }
