@@ -29,6 +29,7 @@ import top.asimov.pigeon.config.DownloadProperties;
 import top.asimov.pigeon.config.StorageProperties;
 import top.asimov.pigeon.event.EpisodesCreatedEvent;
 import top.asimov.pigeon.exception.BusinessException;
+import top.asimov.pigeon.helper.DownloadProcessRegistry;
 import top.asimov.pigeon.mapper.ChannelMapper;
 import top.asimov.pigeon.mapper.EpisodeMapper;
 import top.asimov.pigeon.mapper.PlaylistEpisodeMapper;
@@ -58,12 +59,14 @@ public class EpisodeService {
   private final StorageProperties storageProperties;
   private final S3StorageService s3StorageService;
   private final DownloadProperties downloadProperties;
+  private final DownloadProcessRegistry downloadProcessRegistry;
 
   public EpisodeService(EpisodeMapper episodeMapper, ApplicationEventPublisher eventPublisher,
       MessageSource messageSource, ChannelMapper channelMapper,
       PlaylistEpisodeMapper playlistEpisodeMapper, PlaylistMapper playlistMapper,
       StorageProperties storageProperties,
-      S3StorageService s3StorageService, DownloadProperties downloadProperties) {
+      S3StorageService s3StorageService, DownloadProperties downloadProperties,
+      DownloadProcessRegistry downloadProcessRegistry) {
     this.episodeMapper = episodeMapper;
     this.eventPublisher = eventPublisher;
     this.messageSource = messageSource;
@@ -73,6 +76,7 @@ public class EpisodeService {
     this.storageProperties = storageProperties;
     this.s3StorageService = s3StorageService;
     this.downloadProperties = downloadProperties;
+    this.downloadProcessRegistry = downloadProcessRegistry;
   }
 
   public boolean isS3Mode() {
@@ -357,6 +361,11 @@ public class EpisodeService {
     List<String> recoveredIds = new ArrayList<>();
     for (Episode episode : candidates) {
       if (episode == null || episode.getId() == null || episode.getDownloadStartedAt() == null) {
+        continue;
+      }
+      if (downloadProcessRegistry.terminate(episode.getId())) {
+        log.warn("[download] stale active process termination requested: episodeId={}",
+            episode.getId());
         continue;
       }
       episode.setMediaFilePath(null);

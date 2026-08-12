@@ -1,7 +1,6 @@
 package top.asimov.pigeon.helper;
 
 import java.time.LocalDateTime;
-import java.util.List;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.retry.annotation.Backoff;
 import org.springframework.retry.annotation.Retryable;
@@ -32,17 +31,7 @@ public class TaskStatusHelper {
       backoff = @Backoff(delay = 200, multiplier = 2, maxDelay = 2000))
   public boolean tryMarkDownloading(String episodeId) {
     try {
-      Episode episode = episodeMapper.selectById(episodeId);
-      if (episode == null) {
-        return false;
-      }
-      if (!List.of(EpisodeStatus.READY.name(), EpisodeStatus.PENDING.name(),
-              EpisodeStatus.FAILED.name())
-          .contains(episode.getDownloadStatus())) {
-        return false;
-      }
-      episodeMapper.markDownloading(episodeId, LocalDateTime.now());
-      return true;
+      return episodeMapper.tryMarkDownloading(episodeId, LocalDateTime.now()) == 1;
     } catch (Exception e) {
       log.warn("[download] mark downloading failed: episodeId={}", episodeId, e);
       throw e;

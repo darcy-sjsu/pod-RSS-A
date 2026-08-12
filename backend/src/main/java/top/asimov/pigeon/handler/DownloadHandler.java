@@ -29,6 +29,7 @@ import org.springframework.util.StringUtils;
 import top.asimov.pigeon.config.DownloadProperties;
 import top.asimov.pigeon.config.MediaPathProperties;
 import top.asimov.pigeon.config.StorageProperties;
+import top.asimov.pigeon.helper.DownloadProcessRegistry;
 import top.asimov.pigeon.helper.TaskStatusHelper;
 import top.asimov.pigeon.mapper.ChannelMapper;
 import top.asimov.pigeon.mapper.EpisodeMapper;
@@ -83,6 +84,7 @@ public class DownloadHandler {
   private final TaskStatusHelper taskStatusHelper;
   private final YtDlpProxyService ytDlpProxyService;
   private final DownloadProperties downloadProperties;
+  private final DownloadProcessRegistry downloadProcessRegistry;
 
   public DownloadHandler(EpisodeMapper episodeMapper, CookieService cookieService,
       ChannelMapper channelMapper, PlaylistMapper playlistMapper,
@@ -91,7 +93,7 @@ public class DownloadHandler {
       StorageProperties storageProperties, S3StorageService s3StorageService,
       MediaPathProperties mediaPathProperties, SystemConfigService systemConfigService,
       TaskStatusHelper taskStatusHelper, YtDlpProxyService ytDlpProxyService,
-      DownloadProperties downloadProperties) {
+      DownloadProperties downloadProperties, DownloadProcessRegistry downloadProcessRegistry) {
     this.episodeMapper = episodeMapper;
     this.cookieService = cookieService;
     this.channelMapper = channelMapper;
@@ -107,6 +109,7 @@ public class DownloadHandler {
     this.taskStatusHelper = taskStatusHelper;
     this.ytDlpProxyService = ytDlpProxyService;
     this.downloadProperties = downloadProperties;
+    this.downloadProcessRegistry = downloadProcessRegistry;
   }
 
   public void download(String episodeId) {
@@ -116,13 +119,10 @@ public class DownloadHandler {
       return;
     }
 
-    // 在提交阶段已标记为 DOWNLOADING；若因竞态未被设置，此处兜底设置
     if (!EpisodeStatus.DOWNLOADING.name().equals(episode.getDownloadStatus())) {
-      episode.setDownloadStatus(EpisodeStatus.DOWNLOADING.name());
-      episode.setNextRetryAt(null);
-      episode.setFailureNotifiedAt(null);
-      episode.setDownloadStartedAt(LocalDateTime.now());
-      taskStatusHelper.persistEpisodeWithRetry(episode);
+      log.warn("[download] execution skipped: episodeId={} status={} reason=claimMissing",
+          episodeId, episode.getDownloadStatus());
+      return;
     }
 
     String tempCookiesFile = null;
@@ -242,16 +242,23 @@ public class DownloadHandler {
         log.info("[download] completed: episodeId={} title={} mediaType={}",
             episode.getId(), episode.getTitle(), mimeType);
       } else {
-        markDownloadFailed(episode, errorLog.toString());
+        cleanupInfoJsonFile(outputDirPath, outputBaseName, episodeId);
+        cleanupEpisodeOutputFiles(outputDirPath, outputBaseName, episodeId);
+        String sanitizedError = redactSensitiveOutput(errorLog.toString(), tempCookiesFile);
+        markDownloadFailed(episode, sanitizedError);
         log.error("[download] failed: episodeId={} title={} exitCode={} output={}",
             episode.getId(), episode.getTitle(), exitCode,
-            formatProcessOutputForLog(errorLog.toString()));
+            formatProcessOutputForLog(sanitizedError));
       }
 
     } catch (Exception e) {
       log.error("[download] failed with exception: episodeId={} title={}", episode.getId(),
           episode.getTitle(), e);
-      markDownloadFailed(episode, e.toString());
+      cleanupInfoJsonFile(outputDirPath, outputBaseNameReservation == null
+          ? null : outputBaseNameReservation.baseName(), episodeId);
+      cleanupEpisodeOutputFiles(outputDirPath, outputBaseNameReservation == null
+          ? null : outputBaseNameReservation.baseName(), episodeId);
+      markDownloadFailed(episode, redactSensitiveOutput(e.toString(), tempCookiesFile));
       rollbackUploadedKeys(uploadedKeys);
     } finally {
       if (outputBaseNameReservation != null) {
@@ -496,6 +503,8 @@ public class DownloadHandler {
 
     List<String> command = new ArrayList<>(executionContext.command());
 
+    command.add("--ignore-config");
+    addCustomArgs(command, feedContext);
     addDownloadSpecificOptions(command, feedContext);
 
     String videoUrl = FeedSourceUrlBuilder.buildEpisodeUrl(feedContext.source(), videoId);
@@ -504,7 +513,6 @@ public class DownloadHandler {
     // 添加字幕下载选项
     addSubtitleOptions(command, feedContext);
 
-    addCustomArgs(command, feedContext);
     ytDlpProxyService.appendCurrentProxyArgs(command);
     if (feedContext.downloadType() == DownloadType.AUDIO) {
       // 音频两阶段策略：第一阶段只下载与常规后处理，禁止隐式章节嵌入
@@ -546,10 +554,14 @@ public class DownloadHandler {
     Process process = null;
     try {
       process = processBuilder.start();
+      if (!downloadProcessRegistry.register(episodeId, process)) {
+        downloadProcessRegistry.terminateProcessTree(process);
+        throw new IllegalStateException("download process already active for episode " + episodeId);
+      }
       long timeoutMinutes = downloadProperties.getProcessTimeoutMinutes();
       boolean finished = process.waitFor(timeoutMinutes, TimeUnit.MINUTES);
       if (!finished) {
-        destroyProcessTree(process);
+        downloadProcessRegistry.terminateProcessTree(process);
         String outputTail = readLogTail(outputLog, PROCESS_OUTPUT_TAIL_CHARS);
         log.warn("[yt-dlp] process timed out: label={} episodeId={} timeoutMinutes={} output={}",
             label, episodeId, timeoutMinutes, outputTail);
@@ -567,36 +579,19 @@ public class DownloadHandler {
       return new ProcessExecutionResult(exitCode, outputTail);
     } catch (InterruptedException e) {
       if (process != null) {
-        destroyProcessTree(process);
+        downloadProcessRegistry.terminateProcessTree(process);
       }
       Thread.currentThread().interrupt();
       throw e;
     } finally {
+      if (process != null) {
+        downloadProcessRegistry.unregister(episodeId, process);
+      }
       try {
         Files.deleteIfExists(outputLog);
       } catch (IOException e) {
         log.debug("[yt-dlp] process output log cleanup failed: path={}", outputLog, e);
       }
-    }
-  }
-
-  private void destroyProcessTree(Process process) {
-    ProcessHandle handle = process.toHandle();
-    handle.descendants().forEach(ProcessHandle::destroy);
-    handle.destroy();
-    try {
-      if (process.waitFor(10, TimeUnit.SECONDS)) {
-        return;
-      }
-    } catch (InterruptedException e) {
-      Thread.currentThread().interrupt();
-    }
-
-    handle.descendants()
-        .filter(ProcessHandle::isAlive)
-        .forEach(ProcessHandle::destroyForcibly);
-    if (handle.isAlive()) {
-      handle.destroyForcibly();
     }
   }
 
@@ -799,6 +794,7 @@ public class DownloadHandler {
 
     // 忽略一些非致命错误
     command.add("--ignore-errors");
+    command.add("--no-overwrites");
 
     // 如果有cookies文件，添加cookies参数
     if (cookiesFilePath != null) {
@@ -1133,6 +1129,13 @@ public class DownloadHandler {
     return existing + System.lineSeparator() + extra;
   }
 
+  private String redactSensitiveOutput(String output, String cookiesFilePath) {
+    if (!StringUtils.hasText(output) || !StringUtils.hasText(cookiesFilePath)) {
+      return output;
+    }
+    return output.replace(cookiesFilePath, "[cookies-file]");
+  }
+
   private String formatProcessOutputForLog(String output) {
     if (!StringUtils.hasText(output)) {
       return "<empty>";
@@ -1211,31 +1214,24 @@ public class DownloadHandler {
   }
 
   private Path resolveInfoJsonPath(String outputDirPath, String outputBaseName, String episodeId) {
-    Path byEpisodeId = Path.of(outputDirPath, episodeId + ".info.json");
-    if (Files.exists(byEpisodeId)) {
-      return byEpisodeId;
-    }
-
-    Path byBaseName = Path.of(outputDirPath, outputBaseName + ".info.json");
-    if (Files.exists(byBaseName)) {
-      return byBaseName;
-    }
-
-    try {
-      Path outputDir = Path.of(outputDirPath);
-      if (!Files.isDirectory(outputDir)) {
-        return null;
-      }
-      try (var stream = Files.list(outputDir)) {
-        return stream
-            .filter(path -> path.getFileName().toString().endsWith(".info.json"))
-            .findFirst()
-            .orElse(null);
-      }
-    } catch (Exception e) {
-      log.debug("[yt-dlp] info json scan failed: outputDir={}", outputDirPath, e);
+    if (!StringUtils.hasText(outputDirPath)) {
       return null;
     }
+
+    if (StringUtils.hasText(episodeId)) {
+      Path byEpisodeId = Path.of(outputDirPath, episodeId + ".info.json");
+      if (Files.exists(byEpisodeId)) {
+        return byEpisodeId;
+      }
+    }
+
+    if (StringUtils.hasText(outputBaseName)) {
+      Path byBaseName = Path.of(outputDirPath, outputBaseName + ".info.json");
+      if (Files.exists(byBaseName)) {
+        return byBaseName;
+      }
+    }
+    return null;
   }
 
   private Double readSeconds(JsonNode valueNode) {

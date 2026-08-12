@@ -18,8 +18,8 @@ public interface EpisodeMapper extends BaseMapper<Episode> {
 
   @Update("update episode set download_status = 'DOWNLOADING', auto_download_after = null, "
       + "next_retry_at = null, failure_notified_at = null, download_started_at = #{startedAt} "
-      + "where id = #{id}")
-  void markDownloading(@Param("id") String id, @Param("startedAt") LocalDateTime startedAt);
+      + "where id = #{id} and download_status in ('READY', 'PENDING', 'FAILED')")
+  int tryMarkDownloading(@Param("id") String id, @Param("startedAt") LocalDateTime startedAt);
 
   @Update("update episode set auto_download_after = #{autoDownloadAfter} where id = #{id} and download_status = 'READY'")
   void updateAutoDownloadAfterWhenReady(@Param("id") String id,

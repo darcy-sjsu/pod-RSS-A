@@ -16,6 +16,7 @@ import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.MessageSource;
 import top.asimov.pigeon.config.DownloadProperties;
 import top.asimov.pigeon.config.StorageProperties;
+import top.asimov.pigeon.helper.DownloadProcessRegistry;
 import top.asimov.pigeon.mapper.ChannelMapper;
 import top.asimov.pigeon.mapper.EpisodeMapper;
 import top.asimov.pigeon.mapper.PlaylistEpisodeMapper;
@@ -44,6 +45,8 @@ class EpisodeServiceTest {
   private S3StorageService s3StorageService;
   @Mock
   private DownloadProperties downloadProperties;
+  @Mock
+  private DownloadProcessRegistry downloadProcessRegistry;
 
   private EpisodeService episodeService;
 
@@ -58,7 +61,8 @@ class EpisodeServiceTest {
         playlistMapper,
         storageProperties,
         s3StorageService,
-        downloadProperties);
+        downloadProperties,
+        downloadProcessRegistry);
   }
 
   @Test
