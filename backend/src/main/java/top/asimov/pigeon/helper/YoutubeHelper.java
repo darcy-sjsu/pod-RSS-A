@@ -302,8 +302,8 @@ public class YoutubeHelper {
 
         YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
         YouTube.Channels.List channelRequest = youtubeService.channels()
-            .list("snippet,statistics,brandingSettings");
-        channelRequest.setId(channelId);
+            .list(List.of("snippet", "statistics", "brandingSettings"));
+        channelRequest.setId(List.of(channelId));
         channelRequest.setKey(youtubeApiKey);
 
         log.info("[youtube-api] channels.list requested: part=snippet,statistics,brandingSettings channelId={}",
@@ -346,8 +346,8 @@ public class YoutubeHelper {
         String youtubeApiKey = YoutubeApiKeyHolder.requireYoutubeApiKey(messageSource);
 
         YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
-        YouTube.Playlists.List playlistRequest = youtubeService.playlists().list("snippet");
-        playlistRequest.setId(playlistId);
+        YouTube.Playlists.List playlistRequest = youtubeService.playlists().list(List.of("snippet"));
+        playlistRequest.setId(List.of(playlistId));
         playlistRequest.setKey(youtubeApiKey);
 
         log.info("[youtube-api] playlists.list requested: part=snippet playlistId={}", playlistId);
@@ -395,7 +395,7 @@ public class YoutubeHelper {
         String youtubeApiKey = YoutubeApiKeyHolder.requireYoutubeApiKey(messageSource);
         YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
         YouTube.Channels.List request = youtubeService.channels()
-            .list("snippet,statistics,brandingSettings")
+            .list(List.of("snippet", "statistics", "brandingSettings"))
             .setKey(youtubeApiKey);
         if (lookup.type() == ChannelLookupType.HANDLE) {
           request.setForHandle(lookup.value());

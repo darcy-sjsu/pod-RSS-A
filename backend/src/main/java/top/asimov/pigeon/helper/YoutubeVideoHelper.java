@@ -441,8 +441,8 @@ public class YoutubeVideoHelper {
 
   private String getUploadsPlaylistId(YouTube youtubeService, String channelId, String youtubeApiKey)
       throws IOException {
-    YouTube.Channels.List channelRequest = youtubeService.channels().list("contentDetails");
-    channelRequest.setId(channelId).setKey(youtubeApiKey);
+    YouTube.Channels.List channelRequest = youtubeService.channels().list(List.of("contentDetails"));
+    channelRequest.setId(List.of(channelId)).setKey(youtubeApiKey);
     log.info("[youtube-api] channels.list requested: part=contentDetails channelId={}", channelId);
     ChannelListResponse channelResponse = youtubeApiExecutor.execute(
         YoutubeApiMethod.CHANNELS_LIST,
@@ -466,7 +466,7 @@ public class YoutubeVideoHelper {
       String nextPageToken, String youtubeApiKey, String part) throws IOException {
     String effectivePart = StringUtils.hasText(part) ? part : "snippet";
     YouTube.PlaylistItems.List request = youtubeService.playlistItems()
-        .list(effectivePart)
+        .list(java.util.Arrays.asList(effectivePart.split(",")))
         .setPlaylistId(playlistId)
         .setMaxResults(pageSize)
         .setPageToken(nextPageToken)
@@ -486,8 +486,8 @@ public class YoutubeVideoHelper {
     VideoListResponse videoResponse = youtubeApiExecutor.execute(
         YoutubeApiMethod.VIDEOS_LIST,
         () -> youtubeService.videos()
-            .list("contentDetails,snippet,liveStreamingDetails")
-            .setId(String.join(",", videoIds))
+            .list(List.of("contentDetails", "snippet", "liveStreamingDetails"))
+            .setId(videoIds)
             .setKey(apiKey)
             .execute());
 

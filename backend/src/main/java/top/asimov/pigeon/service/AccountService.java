@@ -680,8 +680,8 @@ public class AccountService {
       proxyExecutionScope.callWithProxy(proxySettings, () -> {
         youtubeServiceFactory.createClient(proxySettings, requestInitializer)
             .videos()
-            .list("id")
-            .setId("dQw4w9WgXcQ")
+            .list(List.of("id"))
+            .setId(List.of("dQw4w9WgXcQ"))
             .setKey(youtubeApiKey)
             .execute();
         return null;
