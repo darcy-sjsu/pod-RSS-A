@@ -233,6 +233,18 @@ class PlaylistServiceTest {
     verify(playlistEpisodeMapper).insertMapping(eq("pl"), eq("v1"), eq(0L), any(), any(), any(), any());
   }
 
+  @Test
+  void normalizesSourceWhenSavingYoutubePlaylist() {
+    Playlist playlist = youtubePlaylist();
+    playlist.setSource("bilibili");
+    playlist.setAutoDownloadEnabled(Boolean.FALSE);
+
+    playlistService.savePlaylist(playlist);
+
+    assertEquals(FeedSource.YOUTUBE.name(), playlist.getSource());
+    verify(playlistMapper).insert(playlist);
+  }
+
   private Playlist youtubePlaylist() {
     return Playlist.builder()
         .id("pl")

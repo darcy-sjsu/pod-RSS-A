@@ -6,7 +6,8 @@ public enum CookiePlatform {
   RUMBLE;
 
   public static CookiePlatform fromFeedSource(String rawSource) {
-    if (FeedSource.YOUTUBE.name().equals(rawSource)) {
+    if (rawSource != null
+        && FeedSource.YOUTUBE.name().equalsIgnoreCase(rawSource.trim())) {
       return YOUTUBE;
     }
     return null;

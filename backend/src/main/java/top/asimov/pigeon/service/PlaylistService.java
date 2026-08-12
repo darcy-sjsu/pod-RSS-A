@@ -240,6 +240,7 @@ public class PlaylistService extends AbstractFeedService<Playlist> {
 
   @Transactional
   public FeedSaveResult<Playlist> savePlaylist(Playlist playlist) {
+    playlist.setSource(FeedSource.YOUTUBE.name());
     if (IndividualVideoPlaylistSupport.isSingleVideoPlaylist(playlist)) {
       return saveSingleVideoPlaylist(playlist);
     }

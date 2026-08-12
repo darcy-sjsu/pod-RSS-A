@@ -39,4 +39,10 @@ DELETE FROM channel WHERE UPPER(source) = 'BILIBILI';
 
 DELETE FROM playlist WHERE UPPER(source) = 'BILIBILI';
 
+-- Normalize surviving YouTube rows so quota checks and cookie selection use the
+-- same source value after the application becomes YouTube-only.
+UPDATE channel SET source = 'YOUTUBE' WHERE UPPER(source) = 'YOUTUBE';
+
+UPDATE playlist SET source = 'YOUTUBE' WHERE UPPER(source) = 'YOUTUBE';
+
 DELETE FROM cookie_config WHERE UPPER(platform) = 'BILIBILI';

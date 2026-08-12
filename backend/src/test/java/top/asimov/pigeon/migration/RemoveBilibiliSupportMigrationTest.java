@@ -32,6 +32,8 @@ class RemoveBilibiliSupportMigrationTest {
       assertEquals(0, countById(connection, "channel", "bilibili-channel"));
       assertEquals(1, countById(connection, "playlist", "youtube-playlist"));
       assertEquals(0, countById(connection, "playlist", "bilibili-playlist"));
+      assertEquals("YOUTUBE", selectSource(connection, "channel", "youtube-channel"));
+      assertEquals("YOUTUBE", selectSource(connection, "playlist", "youtube-playlist"));
       assertEquals(1, countById(connection, "cookie_config", "YOUTUBE"));
       assertEquals(0, countById(connection, "cookie_config", "BILIBILI"));
 
@@ -69,12 +71,12 @@ class RemoveBilibiliSupportMigrationTest {
     try (Statement statement = connection.createStatement()) {
       statement.execute("""
           INSERT INTO channel (id, source) VALUES
-            ('youtube-channel', 'YOUTUBE'),
+            ('youtube-channel', 'youtube'),
             ('bilibili-channel', 'BILIBILI')
           """);
       statement.execute("""
           INSERT INTO playlist (id, source) VALUES
-            ('youtube-playlist', 'YOUTUBE'),
+            ('youtube-playlist', 'YouTube'),
             ('bilibili-playlist', 'BILIBILI')
           """);
       statement.execute("""
@@ -144,6 +146,17 @@ class RemoveBilibiliSupportMigrationTest {
     try (PreparedStatement statement =
         connection.prepareStatement("SELECT channel_id FROM episode WHERE id = ?")) {
       statement.setString(1, episodeId);
+      try (ResultSet resultSet = statement.executeQuery()) {
+        resultSet.next();
+        return resultSet.getString(1);
+      }
+    }
+  }
+
+  private String selectSource(Connection connection, String table, String id) throws SQLException {
+    try (PreparedStatement statement =
+        connection.prepareStatement("SELECT source FROM " + table + " WHERE id = ?")) {
+      statement.setString(1, id);
       try (ResultSet resultSet = statement.executeQuery()) {
         resultSet.next();
         return resultSet.getString(1);
