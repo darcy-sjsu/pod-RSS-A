@@ -121,7 +121,7 @@ public class PublicEpisodeService {
     }
 
     assert episode != null;
-    Playlist playlist = playlistMapper.selectLatestByEpisodeId(episode.getId());
+    Playlist playlist = playlistMapper.selectCanonicalByEpisodeId(episode.getId());
     if (playlist != null && StringUtils.hasText(playlist.getSource())) {
       return playlist.getSource();
     }
