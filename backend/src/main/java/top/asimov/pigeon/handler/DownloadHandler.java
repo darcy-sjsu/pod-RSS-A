@@ -201,6 +201,13 @@ public class DownloadHandler {
         if (downloadType == DownloadType.AUDIO) {
           embedAudioChaptersWithYtDlpBestEffort(episodeId, outputDirPath, effectiveOutputBaseName);
         }
+        if (downloadProcessRegistry.consumeCancellation(episodeId)) {
+          cleanupInfoJsonFile(outputDirPath, outputBaseName, episodeId);
+          cleanupEpisodeOutputFiles(outputDirPath, effectiveOutputBaseName, episodeId);
+          markDownloadCancelled(episode);
+          log.info("[download] cancelled during post-processing: episodeId={}", episode.getId());
+          return;
+        }
         LightweightMediaValidationResult validationResult = validateDownloadedMediaFile(mediaFilePath);
         if (!validationResult.valid()) {
           cleanupInfoJsonFile(outputDirPath, outputBaseName, episodeId);
@@ -239,6 +246,13 @@ public class DownloadHandler {
           episode.setMediaFilePath(mediaFilePath.toString());
           episode.setMediaSizeBytes(Files.exists(mediaFilePath) ? Files.size(mediaFilePath) : null);
           episode.setMediaEtag(null);
+        }
+        if (downloadProcessRegistry.consumeCancellation(episodeId)) {
+          rollbackUploadedKeys(uploadedKeys);
+          cleanupEpisodeOutputFiles(outputDirPath, effectiveOutputBaseName, episodeId);
+          markDownloadCancelled(episode);
+          log.info("[download] cancelled before completion: episodeId={}", episode.getId());
+          return;
         }
         episode.setMediaType(mimeType);
         episode.setDownloadStatus(EpisodeStatus.COMPLETED.name());
