@@ -54,6 +54,7 @@ const DashboardEpisodes = () => {
       optionLabelKey: 'dashboard_downloading',
       headingKey: 'dashboard_status_heading_downloading',
       confirmLabelKey: 'dashboard_status_confirm_downloading',
+      bulkActions: [{ type: 'CANCEL', color: 'MediumSeaGreen', Icon: IconCircleX }],
     },
     COMPLETED: {
       optionLabelKey: 'dashboard_completed',

@@ -22,6 +22,7 @@ import top.asimov.pigeon.mapper.EpisodeMapper;
 import top.asimov.pigeon.mapper.PlaylistEpisodeMapper;
 import top.asimov.pigeon.mapper.PlaylistMapper;
 import top.asimov.pigeon.model.entity.Episode;
+import top.asimov.pigeon.model.enums.EpisodeStatus;
 import top.asimov.pigeon.service.storage.S3StorageService;
 
 @ExtendWith(MockitoExtension.class)
@@ -83,5 +84,20 @@ class EpisodeServiceTest {
     verify(episodeMapper).clearChannelId("shared", "channel");
     verify(episodeMapper).deleteById("orphan");
     verify(episodeMapper, never()).deleteById("shared");
+  }
+
+  @Test
+  void cancelsActiveDownloadProcessBeforeResettingStatus() {
+    Episode episode = Episode.builder()
+        .id("episode")
+        .downloadStatus(EpisodeStatus.DOWNLOADING.name())
+        .build();
+    when(episodeMapper.selectById("episode")).thenReturn(episode);
+
+    episodeService.cancelPendingEpisode("episode");
+
+    verify(downloadProcessRegistry).requestCancellation("episode");
+    verify(episodeMapper).updateDownloadStatusAndClearSchedulingFields(
+        "episode", EpisodeStatus.READY.name());
   }
 }

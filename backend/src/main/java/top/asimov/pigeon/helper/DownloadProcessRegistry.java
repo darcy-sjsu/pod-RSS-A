@@ -2,6 +2,7 @@ package top.asimov.pigeon.helper;
 
 import jakarta.annotation.PreDestroy;
 import java.util.Map;
+import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.TimeUnit;
 import lombok.extern.slf4j.Slf4j;
@@ -12,6 +13,7 @@ import org.springframework.stereotype.Component;
 public class DownloadProcessRegistry {
 
   private final Map<String, Process> activeProcesses = new ConcurrentHashMap<>();
+  private final Set<String> cancellationRequests = ConcurrentHashMap.newKeySet();
 
   public boolean register(String episodeId, Process process) {
     if (episodeId == null || process == null) {
@@ -34,6 +36,18 @@ public class DownloadProcessRegistry {
     }
     terminateProcessTree(process);
     return true;
+  }
+
+  public boolean requestCancellation(String episodeId) {
+    if (episodeId == null) {
+      return false;
+    }
+    cancellationRequests.add(episodeId);
+    return terminate(episodeId);
+  }
+
+  public boolean consumeCancellation(String episodeId) {
+    return episodeId != null && cancellationRequests.remove(episodeId);
   }
 
   public void terminateProcessTree(Process process) {

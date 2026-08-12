@@ -966,7 +966,7 @@ public class EpisodeService {
   }
 
   /**
-   * 取消PENDING状态的任务
+   * Cancels a queued or actively running download.
    */
   @Transactional
   public void cancelPendingEpisode(String episodeId) {
@@ -981,8 +981,10 @@ public class EpisodeService {
               LocaleContextHolder.getLocale()));
     }
 
-    // 状态校验：只允许取消 PENDING 状态的 Episode
-    if (!EpisodeStatus.PENDING.name().equals(episode.getDownloadStatus())) {
+    String downloadStatus = episode.getDownloadStatus();
+    boolean isPending = EpisodeStatus.PENDING.name().equals(downloadStatus);
+    boolean isDownloading = EpisodeStatus.DOWNLOADING.name().equals(downloadStatus);
+    if (!isPending && !isDownloading) {
       log.info("[download] pending download cancel rejected: episodeId={} status={} reason=invalidStatus",
           episodeId, episode.getDownloadStatus());
       throw new BusinessException(
@@ -991,7 +993,9 @@ public class EpisodeService {
               LocaleContextHolder.getLocale()));
     }
 
-    // 更新状态为 READY
+    if (isDownloading) {
+      downloadProcessRegistry.requestCancellation(episodeId);
+    }
     episodeMapper.updateDownloadStatusAndClearSchedulingFields(episodeId,
         EpisodeStatus.READY.name());
   }
@@ -1060,8 +1064,10 @@ public class EpisodeService {
       throw new BusinessException("Delete operation only supports completed or failed episodes");
     }
 
-    if (action == EpisodeBatchAction.CANCEL && targetStatus != EpisodeStatus.PENDING) {
-      throw new BusinessException("Cancel operation only supports pending episodes");
+    if (action == EpisodeBatchAction.CANCEL
+        && targetStatus != EpisodeStatus.PENDING
+        && targetStatus != EpisodeStatus.DOWNLOADING) {
+      throw new BusinessException("Cancel operation only supports pending or downloading episodes");
     }
     if (action == EpisodeBatchAction.DOWNLOAD && targetStatus != EpisodeStatus.READY) {
       throw new BusinessException("Download operation only supports ready episodes");

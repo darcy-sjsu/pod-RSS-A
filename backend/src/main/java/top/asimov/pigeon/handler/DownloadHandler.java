@@ -166,6 +166,13 @@ public class DownloadHandler {
       if (StringUtils.hasText(processResult.outputTail())) {
         errorLog.append(processResult.outputTail());
       }
+      if (downloadProcessRegistry.consumeCancellation(episodeId)) {
+        cleanupInfoJsonFile(outputDirPath, outputBaseName, episodeId);
+        cleanupEpisodeOutputFiles(outputDirPath, outputBaseName, episodeId);
+        markDownloadCancelled(episode);
+        log.info("[download] cancelled: episodeId={} title={}", episode.getId(), episode.getTitle());
+        return;
+      }
 
       // 设置详细的错误日志
       if (exitCode != 0 && !errorLog.isEmpty()) {
@@ -260,7 +267,11 @@ public class DownloadHandler {
           ? null : outputBaseNameReservation.baseName(), episodeId);
       cleanupEpisodeOutputFiles(outputDirPath, outputBaseNameReservation == null
           ? null : outputBaseNameReservation.baseName(), episodeId);
-      markDownloadFailed(episode, redactSensitiveOutput(e.toString(), tempCookiesFile));
+      if (downloadProcessRegistry.consumeCancellation(episodeId)) {
+        markDownloadCancelled(episode);
+      } else {
+        markDownloadFailed(episode, redactSensitiveOutput(e.toString(), tempCookiesFile));
+      }
       rollbackUploadedKeys(uploadedKeys);
     } finally {
       if (outputBaseNameReservation != null) {
@@ -1126,6 +1137,19 @@ public class DownloadHandler {
     episode.setDownloadStatus(EpisodeStatus.FAILED.name());
     episode.setDownloadStartedAt(null);
     scheduleNextRetry(episode, LocalDateTime.now());
+  }
+
+  private void markDownloadCancelled(Episode episode) {
+    episode.setMediaFilePath(null);
+    episode.setMediaSizeBytes(null);
+    episode.setMediaEtag(null);
+    episode.setMediaType(null);
+    episode.setErrorLog(null);
+    episode.setDownloadStatus(EpisodeStatus.READY.name());
+    episode.setRetryNumber(0);
+    episode.setNextRetryAt(null);
+    episode.setFailureNotifiedAt(null);
+    episode.setDownloadStartedAt(null);
   }
 
   private String composeErrorLog(String existingErrorLog, String extraErrorLog) {

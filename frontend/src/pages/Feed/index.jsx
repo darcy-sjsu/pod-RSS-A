@@ -1274,7 +1274,8 @@ const FeedDetail = () => {
                               {t('retry')}
                             </Button>
                           ) : null}
-                          {isAdmin && episode.downloadStatus === 'PENDING' ? (
+                          {isAdmin &&
+                          ['PENDING', 'DOWNLOADING'].includes(episode.downloadStatus) ? (
                             <Button
                               size="compact-xs"
                               variant="outline"
