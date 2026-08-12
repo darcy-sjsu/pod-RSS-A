@@ -132,7 +132,7 @@ PigeonPod 是一个自托管的 YouTube 到 Podcast 桥接系统，目标是：
 ### 7.2 同步与历史补抓
 
 - 增量同步通过 `refreshChannel` / `refreshPlaylist` 完成：
-  - 频道抓最新页并做差值。
+  - 频道从最新页开始持续分页，直到命中 `lastSyncVideoId`，再做差值，避免单周期新增超过 50 条时漏集。
   - 播放列表按配置的同步间隔到期后全量扫描并做差值，同时刷新顺序映射。
 - 历史补抓通过 `/api/feed/{type}/history/{id}`：
   - 后端按页码向后抓取更早历史并入库。
@@ -142,13 +142,14 @@ PigeonPod 是一个自托管的 YouTube 到 Podcast 桥接系统，目标是：
 
 1. 可下载节目（自动或手动）发布 `EpisodesCreatedEvent`。
 2. `DownloadTaskHelper.submitDownloadTask`：
-   - `TaskStatusHelper.tryMarkDownloading`（`REQUIRES_NEW`）将 `READY/PENDING/FAILED -> DOWNLOADING`
+   - `TaskStatusHelper.tryMarkDownloading`（`REQUIRES_NEW`）通过数据库条件更新原子地将 `READY/PENDING/FAILED -> DOWNLOADING`
    - 提交 `DownloadHandler.download`。
 3. `DownloadHandler`：
    - 解析 feed 上下文与全局默认配置
    - 按系统级文件命名规则生成下载文件基名，并拼装 yt-dlp 命令（音/视频、质量、编码、字幕、章节、自定义参数）
    - 对 yt-dlp 主进程设置执行超时，超时后终止进程树并按失败处理
    - 写回 `mediaFilePath/mediaType/errorLog/retryNumber/downloadStatus/downloadStartedAt`。
+   - `DownloadProcessRegistry` 按 episode 跟踪进程，支持主动取消、超时回收与应用关闭时清理进程树。
 4. `DownloadScheduler` 负责持续补位队列，回收超时 `DOWNLOADING`，并按 `nextRetryAt` 驱动失败任务的指数退避重试。
 
 ### 7.4 延迟自动下载
@@ -200,6 +201,7 @@ PigeonPod 是一个自托管的 YouTube 到 Podcast 桥接系统，目标是：
   - `stable/nightly` 通道升级
   - 版本保留与回滚
   - 无可用 managed runtime 时回退系统 `yt-dlp` 二进制。
+- Docker Compose 默认启动 bgutil PO Token provider sidecar；应用和 managed runtime 均安装对应 yt-dlp provider 插件。
 - 前端开发态通过 `vite.config.js` 代理 `/api`、`/media` 到 `localhost:8080`。
 
 ## 11. 扩展建议
