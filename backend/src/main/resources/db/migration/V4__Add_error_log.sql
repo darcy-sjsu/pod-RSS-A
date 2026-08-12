@@ -1,0 +1,1 @@
+ALTER TABLE episode ADD COLUMN error_log TEXT DEFAULT NULL;

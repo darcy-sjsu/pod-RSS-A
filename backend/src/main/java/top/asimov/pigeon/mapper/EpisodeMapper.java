@@ -1,0 +1,171 @@
+package top.asimov.pigeon.mapper;
+
+import com.baomidou.mybatisplus.core.mapper.BaseMapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import java.time.LocalDateTime;
+import org.apache.ibatis.annotations.Param;
+import org.apache.ibatis.annotations.Select;
+import org.apache.ibatis.annotations.Update;
+import top.asimov.pigeon.model.dto.EpisodeFeedReference;
+import top.asimov.pigeon.model.entity.Episode;
+
+public interface EpisodeMapper extends BaseMapper<Episode> {
+
+  @Update("update episode set download_status = #{downloadStatus}, auto_download_after = null, "
+      + "next_retry_at = null, failure_notified_at = null, download_started_at = null where id = #{id}")
+  void updateDownloadStatusAndClearSchedulingFields(@Param("id") String id,
+      @Param("downloadStatus") String downloadStatus);
+
+  @Update("update episode set download_status = 'DOWNLOADING', auto_download_after = null, "
+      + "next_retry_at = null, failure_notified_at = null, download_started_at = #{startedAt} "
+      + "where id = #{id}")
+  void markDownloading(@Param("id") String id, @Param("startedAt") LocalDateTime startedAt);
+
+  @Update("update episode set auto_download_after = #{autoDownloadAfter} where id = #{id} and download_status = 'READY'")
+  void updateAutoDownloadAfterWhenReady(@Param("id") String id,
+      @Param("autoDownloadAfter") LocalDateTime autoDownloadAfter);
+
+  @Update("update episode set channel_id = #{channelId} "
+      + "where id = #{episodeId} and (channel_id is null or channel_id = '')")
+  void updateChannelIdIfMissing(@Param("episodeId") String episodeId,
+      @Param("channelId") String channelId);
+
+  @Update("update episode set download_status = #{downloadStatus}, auto_download_after = null, "
+      + "next_retry_at = null, failure_notified_at = null, download_started_at = null "
+      + "where id = #{id} and download_status = 'READY' "
+      + "and auto_download_after is not null and auto_download_after <= #{now}")
+  int promoteDueDelayedAutoDownload(@Param("id") String id,
+      @Param("downloadStatus") String downloadStatus, @Param("now") LocalDateTime now);
+
+  @Select("SELECT e.* FROM episode e "
+      + "LEFT JOIN channel c ON c.id = e.channel_id "
+      + "WHERE e.download_status = 'READY' "
+      + "AND e.auto_download_after IS NOT NULL "
+      + "AND e.auto_download_after <= #{now} "
+      + "AND ( "
+      + "(c.id IS NOT NULL AND c.auto_download_enabled = 1) "
+      + "OR EXISTS ( "
+      + "SELECT 1 FROM playlist_episode pe "
+      + "JOIN playlist p ON p.id = pe.playlist_id "
+      + "WHERE pe.episode_id = e.id AND p.auto_download_enabled = 1"
+      + ")"
+      + ") "
+      + "ORDER BY e.auto_download_after ASC "
+      + "LIMIT #{limit}")
+  java.util.List<Episode> selectDueDelayedAutoDownloadEpisodes(@Param("now") LocalDateTime now,
+      @Param("limit") int limit);
+
+  @Select("SELECT * FROM episode "
+      + "WHERE download_status = 'FAILED' "
+      + "AND next_retry_at IS NOT NULL "
+      + "AND next_retry_at <= #{now} "
+      + "AND retry_number <= #{maxRetryAttempts} "
+      + "ORDER BY next_retry_at ASC, created_at ASC "
+      + "LIMIT #{limit}")
+  java.util.List<Episode> selectDueRetryEpisodes(@Param("now") LocalDateTime now,
+      @Param("maxRetryAttempts") int maxRetryAttempts, @Param("limit") int limit);
+
+  @Select("SELECT * FROM episode "
+      + "WHERE download_status = 'DOWNLOADING' "
+      + "AND download_started_at IS NOT NULL "
+      + "AND download_started_at <= #{staleBefore} "
+      + "ORDER BY download_started_at ASC, created_at ASC "
+      + "LIMIT #{limit}")
+  java.util.List<Episode> selectStaleDownloadingEpisodes(
+      @Param("staleBefore") LocalDateTime staleBefore, @Param("limit") int limit);
+
+  @Update("UPDATE episode SET download_status = 'FAILED', media_file_path = null, "
+      + "media_size_bytes = null, media_etag = null, media_type = null, "
+      + "error_log = #{errorLog}, retry_number = #{retryNumber}, "
+      + "next_retry_at = #{nextRetryAt,jdbcType=TIMESTAMP}, "
+      + "failure_notified_at = null, download_started_at = null "
+      + "WHERE id = #{id} AND download_status = 'DOWNLOADING' "
+      + "AND download_started_at = #{downloadStartedAt}")
+  int recoverStaleDownloadingEpisode(Episode episode);
+
+  @Select("SELECT * FROM episode "
+      + "WHERE download_status = 'FAILED' "
+      + "AND retry_number > #{maxRetryAttempts} "
+      + "AND next_retry_at IS NULL "
+      + "AND failure_notified_at IS NULL "
+      + "ORDER BY created_at ASC "
+      + "LIMIT #{limit}")
+  java.util.List<Episode> selectFailedNotificationCandidates(@Param("maxRetryAttempts") int maxRetryAttempts,
+      @Param("limit") int limit);
+
+  @Update({
+      "<script>",
+      "UPDATE episode ",
+      "SET failure_notified_at = #{notifiedAt} ",
+      "WHERE id IN ",
+      "<foreach collection='episodeIds' item='episodeId' open='(' separator=',' close=')'>",
+      "#{episodeId}",
+      "</foreach>",
+      "</script>"
+  })
+  int updateFailureNotifiedAt(@Param("episodeIds") java.util.List<String> episodeIds,
+      @Param("notifiedAt") LocalDateTime notifiedAt);
+
+  @Select("SELECT CASE WHEN c.id IS NOT NULL THEN 'channel' ELSE 'playlist' END AS feedType, "
+      + "COALESCE(c.id, p.id) AS feedId, "
+      + "COALESCE(c.title, p.title) AS feedName "
+      + "FROM episode e "
+      + "LEFT JOIN channel c ON c.id = e.channel_id "
+      + "LEFT JOIN playlist_episode pe ON pe.episode_id = e.id "
+      + "LEFT JOIN playlist p ON p.id = pe.playlist_id "
+      + "WHERE e.id = #{episodeId} "
+      + "LIMIT 1")
+  EpisodeFeedReference getFeedReferenceByEpisodeId(String episodeId);
+
+  @Select("SELECT e.*, pe.source_channel_id AS source_channel_id, "
+      + "pe.source_channel_name AS source_channel_name, "
+      + "pe.source_channel_url AS source_channel_url FROM playlist_episode pe "
+      + "JOIN episode e ON pe.episode_id = e.id "
+      + "WHERE pe.playlist_id = #{playlistId} "
+      + "ORDER BY pe.published_at DESC")
+  java.util.List<Episode> selectEpisodesByPlaylistId(String playlistId);
+
+  @Select("SELECT * FROM episode "
+      + "WHERE channel_id = #{channelId} "
+      + "ORDER BY published_at ASC, id ASC LIMIT 1")
+  Episode selectEarliestByChannelId(@Param("channelId") String channelId);
+
+  /**
+   * 获取指定频道中已完成下载的最旧节目列表，按发布时间正序排序。 主要用于 EpisodeCleaner 从最旧的节目开始清理。
+   */
+  @Select("SELECT e.* FROM episode e "
+      + "WHERE e.channel_id = #{channelId} "
+      + "AND e.download_status = 'COMPLETED' "
+      + "ORDER BY e.published_at ASC "
+      + "LIMIT #{limit}")
+  java.util.List<Episode> selectOldestCompletedEpisodesByChannel(
+      @Param("channelId") String channelId,
+      @Param("limit") long limit);
+
+  /**
+   * 获取指定播放列表中已完成下载的最旧节目列表，按播放列表内的 published_at 正序排序。 主要用于 EpisodeCleaner 从最旧的节目开始清理。
+   */
+  @Select("SELECT e.* FROM playlist_episode pe "
+      + "JOIN episode e ON pe.episode_id = e.id "
+      + "WHERE pe.playlist_id = #{playlistId} "
+      + "AND e.download_status = 'COMPLETED' "
+      + "ORDER BY pe.published_at ASC, pe.id ASC "
+      + "LIMIT #{limit}")
+  java.util.List<Episode> selectOldestCompletedEpisodesByPlaylist(
+      @Param("playlistId") String playlistId,
+      @Param("limit") long limit);
+
+  /**
+   * 按状态分组统计Episode数量（一次查询返回所有状态的统计）
+   */
+  @Select("SELECT download_status as status, COUNT(*) as count FROM episode GROUP BY download_status")
+  java.util.List<java.util.Map<String, Object>> countGroupByStatus();
+
+  /**
+   * 分页查询指定状态的Episode（关联Channel和Playlist信息） 注意：由于Episode可能同时属于Channel和Playlist，这里优先返回Channel信息
+   */
+  @Select("SELECT e.* FROM episode e "
+      + "WHERE e.download_status = #{status} "
+      + "ORDER BY e.created_at DESC")
+  Page<Episode> selectEpisodesByStatusWithFeedInfo(Page<Episode> page, @Param("status") String status);
+}

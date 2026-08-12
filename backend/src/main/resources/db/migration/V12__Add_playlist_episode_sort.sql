@@ -1,0 +1,1 @@
+ALTER TABLE playlist ADD COLUMN episode_sort INTEGER NULL;

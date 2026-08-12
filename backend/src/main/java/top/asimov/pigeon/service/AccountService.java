@@ -1,0 +1,925 @@
+package top.asimov.pigeon.service;
+
+import cn.dev33.satoken.apikey.model.ApiKeyModel;
+import cn.dev33.satoken.apikey.template.SaApiKeyUtil;
+import cn.dev33.satoken.stp.StpUtil;
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.google.api.client.http.HttpRequestInitializer;
+import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.databind.ObjectMapper;
+import java.nio.charset.StandardCharsets;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.StandardCopyOption;
+import java.time.LocalDateTime;
+import java.time.ZoneOffset;
+import java.time.ZonedDateTime;
+import java.time.format.DateTimeFormatter;
+import java.util.ArrayList;
+import java.util.List;
+import java.io.IOException;
+import lombok.Builder;
+import lombok.Data;
+import lombok.extern.slf4j.Slf4j;
+import org.jdom2.Document;
+import org.jdom2.Element;
+import org.jdom2.output.Format;
+import org.jdom2.output.XMLOutputter;
+import org.springframework.context.MessageSource;
+import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.ObjectUtils;
+import org.springframework.util.StringUtils;
+import org.springframework.web.multipart.MultipartFile;
+import top.asimov.pigeon.config.AppBaseUrlResolver;
+import top.asimov.pigeon.config.OutboundProxyHolder;
+import top.asimov.pigeon.config.MediaPathProperties;
+import top.asimov.pigeon.config.ProxyExecutionScope;
+import top.asimov.pigeon.config.ProxyRuntimeConfigApplier;
+import top.asimov.pigeon.config.StorageRuntimeConfigApplier;
+import top.asimov.pigeon.config.YoutubeApiKeyHolder;
+import top.asimov.pigeon.exception.BusinessException;
+import top.asimov.pigeon.mapper.ChannelMapper;
+import top.asimov.pigeon.mapper.EpisodeMapper;
+import top.asimov.pigeon.mapper.PlaylistMapper;
+import top.asimov.pigeon.mapper.UserMapper;
+import top.asimov.pigeon.model.entity.Channel;
+import top.asimov.pigeon.model.entity.Episode;
+import top.asimov.pigeon.model.entity.Playlist;
+import top.asimov.pigeon.model.entity.SystemConfig;
+import top.asimov.pigeon.model.entity.User;
+import top.asimov.pigeon.model.enums.EpisodeStatus;
+import top.asimov.pigeon.model.enums.FeedType;
+import top.asimov.pigeon.model.enums.StorageType;
+import top.asimov.pigeon.model.request.ExportFeedsOpmlRequest;
+import top.asimov.pigeon.model.response.ProxyTestItemResponse;
+import top.asimov.pigeon.model.response.ProxyTestResponse;
+import top.asimov.pigeon.model.response.StorageSwitchCheckResponse;
+import top.asimov.pigeon.helper.YoutubeServiceFactory;
+import top.asimov.pigeon.service.storage.S3StorageService;
+import top.asimov.pigeon.util.FeedSourceUrlBuilder;
+import top.asimov.pigeon.util.IndividualVideoPlaylistSupport;
+import top.asimov.pigeon.util.PasswordUtil;
+import top.asimov.pigeon.util.YtDlpArgsValidator;
+
+@Slf4j
+@Service
+@Transactional
+public class AccountService {
+
+  private static final int YOUTUBE_PROXY_TEST_CONNECT_TIMEOUT_MS = 10_000;
+  private static final int YOUTUBE_PROXY_TEST_READ_TIMEOUT_MS = 15_000;
+  private static final long YTDLP_PROXY_TEST_TIMEOUT_SECONDS = 20L;
+
+  private final UserMapper userMapper;
+  private final ChannelMapper channelMapper;
+  private final EpisodeMapper episodeMapper;
+  private final PlaylistMapper playlistMapper;
+  private final MessageSource messageSource;
+  private final ObjectMapper objectMapper;
+  private final SystemConfigService systemConfigService;
+  private final AppBaseUrlResolver appBaseUrlResolver;
+  private final S3StorageService s3StorageService;
+  private final StorageRuntimeConfigApplier runtimeConfigApplier;
+  private final ProxyRuntimeConfigApplier proxyRuntimeConfigApplier;
+  private final YoutubeServiceFactory youtubeServiceFactory;
+  private final ProxyExecutionScope proxyExecutionScope;
+  private final OutboundProxyHolder outboundProxyHolder;
+  private final YtDlpRuntimeService ytDlpRuntimeService;
+  private final YtDlpProxyService ytDlpProxyService;
+  private final MediaPathProperties mediaPathProperties;
+
+  public AccountService(UserMapper userMapper, ChannelMapper channelMapper, EpisodeMapper episodeMapper,
+      PlaylistMapper playlistMapper, MessageSource messageSource, ObjectMapper objectMapper,
+      SystemConfigService systemConfigService, AppBaseUrlResolver appBaseUrlResolver,
+      S3StorageService s3StorageService, StorageRuntimeConfigApplier runtimeConfigApplier,
+      ProxyRuntimeConfigApplier proxyRuntimeConfigApplier,
+      YoutubeServiceFactory youtubeServiceFactory,
+      ProxyExecutionScope proxyExecutionScope,
+      OutboundProxyHolder outboundProxyHolder,
+      YtDlpRuntimeService ytDlpRuntimeService,
+      YtDlpProxyService ytDlpProxyService,
+      MediaPathProperties mediaPathProperties) {
+    this.userMapper = userMapper;
+    this.channelMapper = channelMapper;
+    this.episodeMapper = episodeMapper;
+    this.playlistMapper = playlistMapper;
+    this.messageSource = messageSource;
+    this.objectMapper = objectMapper;
+    this.systemConfigService = systemConfigService;
+    this.appBaseUrlResolver = appBaseUrlResolver;
+    this.s3StorageService = s3StorageService;
+    this.runtimeConfigApplier = runtimeConfigApplier;
+    this.proxyRuntimeConfigApplier = proxyRuntimeConfigApplier;
+    this.youtubeServiceFactory = youtubeServiceFactory;
+    this.proxyExecutionScope = proxyExecutionScope;
+    this.outboundProxyHolder = outboundProxyHolder;
+    this.ytDlpRuntimeService = ytDlpRuntimeService;
+    this.ytDlpProxyService = ytDlpProxyService;
+    this.mediaPathProperties = mediaPathProperties;
+  }
+
+  /**
+   * 获取所有用户列表（脱敏）
+   *
+   * @return 用户列表
+   */
+  public List<User> listUsers() {
+    ensureMultiUserEnabled();
+    List<User> users = userMapper.selectList(null);
+    for (User user : users) {
+      user.setPassword(null);
+      user.setSalt(null);
+    }
+    return users;
+  }
+
+  /**
+   * 管理员强制重置用户密码
+   *
+   * @param userId      用户ID
+   * @param newPassword 新密码
+   */
+  public void adminResetPassword(String userId, String newPassword) {
+    ensureMultiUserEnabled();
+    User user = userMapper.selectById(userId);
+    if (ObjectUtils.isEmpty(user)) {
+      throw new BusinessException(
+          messageSource.getMessage("user.not.found", null, LocaleContextHolder.getLocale()));
+    }
+
+    String salt = PasswordUtil.generateSalt(16);
+    String encryptedPassword = PasswordUtil.generateEncryptedPassword(newPassword, salt);
+    user.setPassword(encryptedPassword);
+    user.setSalt(salt);
+    user.setUpdatedAt(LocalDateTime.now());
+    userMapper.updateById(user);
+  }
+
+  /**
+   * 删除用户
+   *
+   * @param userId 用户ID
+   */
+  public void deleteUser(String userId) {
+    ensureMultiUserEnabled();
+    if ("0".equals(userId)) {
+      throw new BusinessException("Cannot delete the root user");
+    }
+    String loginId = StpUtil.getLoginIdAsString();
+    if (userId.equals(loginId)) {
+      throw new BusinessException("Cannot delete yourself");
+    }
+    User user = userMapper.selectById(userId);
+    if (ObjectUtils.isEmpty(user)) {
+      throw new BusinessException(
+          messageSource.getMessage("user.not.found", null, LocaleContextHolder.getLocale()));
+    }
+
+    // If the user has an API key, delete it from Sa-Token
+    if (StringUtils.hasText(user.getApiKey())) {
+      SaApiKeyUtil.deleteApiKey(user.getApiKey());
+    }
+
+    userMapper.deleteById(userId);
+    // Force logout the deleted user
+    StpUtil.logout(userId);
+  }
+
+  /**
+   * 获取当前用户的 API Key，如果不存在则生成一个新的
+   *
+   * @return 用户的 API Key
+   */
+  public String getApiKey() {
+    String loginId = (String) StpUtil.getLoginId();
+    User user = userMapper.selectById(loginId);
+    String apiKey = user.getApiKey();
+    if (!ObjectUtils.isEmpty(apiKey)) {
+      return apiKey;
+    }
+    return generateApiKey();
+  }
+
+  /**
+   * 生成新的 API Key
+   *
+   * @return 新的 API Key
+   */
+  public String generateApiKey() {
+    String loginId = (String) StpUtil.getLoginId();
+    User user = userMapper.selectById(loginId);
+
+    String previousApiKey = user.getApiKey();
+    if (StringUtils.hasText(previousApiKey)) {
+      // If the user already has an API key, delete it
+      SaApiKeyUtil.deleteApiKey(previousApiKey);
+    }
+
+    ApiKeyModel akModel = SaApiKeyUtil
+        .createApiKeyModel(loginId)
+        .setTitle(user.getUsername())
+        .setExpiresTime(-1);
+    SaApiKeyUtil.saveApiKey(akModel);
+    user.setApiKey(akModel.getApiKey());
+    userMapper.updateById(user);
+    return akModel.getApiKey();
+  }
+
+  /**
+   * 更改用户名
+   *
+   * @param userId      用户ID
+   * @param newUsername 新用户名
+   * @return 更新后的用户信息
+   */
+  public User changeUsername(String userId, String newUsername) {
+    if (!StringUtils.hasText(newUsername)) {
+      throw new BusinessException(
+          messageSource.getMessage("user.empty.username", null, LocaleContextHolder.getLocale()));
+    }
+    User user = userMapper.selectById(userId);
+    if (ObjectUtils.isEmpty(user)) {
+      throw new BusinessException(
+          messageSource.getMessage("user.not.found", null, LocaleContextHolder.getLocale()));
+    }
+
+    QueryWrapper<User> queryWrapper = new QueryWrapper<>();
+    queryWrapper.eq("username", newUsername);
+    if (userMapper.selectOne(queryWrapper) != null) {
+      throw new BusinessException(
+          messageSource.getMessage("user.username.taken", null, LocaleContextHolder.getLocale()));
+    }
+
+    user.setUsername(newUsername);
+    user.setUpdatedAt(LocalDateTime.now());
+    userMapper.updateById(user);
+    return user;
+  }
+
+  /**
+   * 添加新用户
+   *
+   * @param username 用户名
+   * @param password 密码
+   * @return 新建的用户信息
+   */
+  public User addUser(String username, String password) {
+    ensureMultiUserEnabled();
+    if (!StringUtils.hasText(username) || !StringUtils.hasText(password)) {
+      throw new BusinessException("Username and password are required");
+    }
+
+    QueryWrapper<User> queryWrapper = new QueryWrapper<>();
+    queryWrapper.eq("username", username);
+    if (userMapper.selectOne(queryWrapper) != null) {
+      throw new BusinessException(
+          messageSource.getMessage("user.username.taken", null, LocaleContextHolder.getLocale()));
+    }
+
+    String salt = PasswordUtil.generateSalt(16);
+    String encryptedPassword = PasswordUtil.generateEncryptedPassword(password, salt);
+    User user = User.builder()
+        .username(username)
+        .password(encryptedPassword)
+        .salt(salt)
+        .role("user")
+        .createdAt(LocalDateTime.now())
+        .updatedAt(LocalDateTime.now())
+        .build();
+    userMapper.insert(user);
+    user.setPassword(null);
+    user.setSalt(null);
+    return user;
+  }
+
+  /**
+   * 重置用户密码
+   *
+   * @param userId      用户ID
+   * @param oldPassword 旧密码
+   * @param newPassword 新密码
+   */
+  public void resetPassword(String userId, String oldPassword, String newPassword) {
+    User user = userMapper.selectById(userId);
+    if (ObjectUtils.isEmpty(user)) {
+      throw new BusinessException(
+          messageSource.getMessage("user.not.found", null, LocaleContextHolder.getLocale()));
+    }
+    // Verify old password
+    boolean verified = PasswordUtil.verifyPassword(oldPassword, user.getSalt(), user.getPassword());
+    if (!verified) {
+      throw new BusinessException(messageSource.getMessage("user.old.password.incorrect", null,
+          LocaleContextHolder.getLocale()));
+    }
+
+    // Update to new password
+    String salt = PasswordUtil.generateSalt(16);
+    String encryptedPassword = PasswordUtil.generateEncryptedPassword(newPassword, salt);
+    user.setPassword(encryptedPassword);
+    user.setSalt(salt);
+    user.setUpdatedAt(LocalDateTime.now());
+    userMapper.updateById(user);
+  }
+
+  /**
+   * 更新用户的 YouTube API Key 与每日配额上限配置。
+   *
+   * @param userId                 用户ID
+   * @param youtubeApiKey          YouTube API Key
+   * @param youtubeDailyLimitUnits 每日配额上限（为空表示不限制）
+   * @return 更新后的系统配置
+   */
+  public SystemConfig updateYoutubeApiSettings(String userId, String youtubeApiKey,
+      Integer youtubeDailyLimitUnits) {
+    User user = userMapper.selectById(userId);
+    if (ObjectUtils.isEmpty(user)) {
+      throw new BusinessException(
+          messageSource.getMessage("user.not.found", null, LocaleContextHolder.getLocale()));
+    }
+
+    SystemConfig config = systemConfigService.updateYoutubeApiSettings(youtubeApiKey,
+        youtubeDailyLimitUnits);
+    YoutubeApiKeyHolder.updateYoutubeApiKey(config.getYoutubeApiKey());
+    return sanitizeSystemConfig(config);
+  }
+
+  /**
+   * 更新用户的日期格式偏好
+   *
+   * @param userId     用户ID
+   * @param dateFormat 日期格式
+   * @return 更新后的日期格式
+   */
+  public String updateDateFormat(String userId, String dateFormat) {
+    User user = userMapper.selectById(userId);
+    if (ObjectUtils.isEmpty(user)) {
+      throw new BusinessException(
+          messageSource.getMessage("user.not.found", null, LocaleContextHolder.getLocale()));
+    }
+    user.setDateFormat(dateFormat);
+    user.setUpdatedAt(LocalDateTime.now());
+    userMapper.updateById(user);
+    return user.getDateFormat();
+  }
+
+  /**
+   * 获取当前登录用户。
+   */
+  public User getCurrentUser() {
+    String loginId = (String) StpUtil.getLoginId();
+    return userMapper.selectById(loginId);
+  }
+
+  /**
+   * 更新登录验证码配置（单用户系统：用户配置即全局配置）
+   *
+   * @param enabled 是否启用
+   * @return 是否启用
+   */
+  public boolean updateLoginCaptchaEnabled(Boolean enabled) {
+    String userId = StpUtil.getLoginIdAsString();
+    User user = userMapper.selectById(userId);
+    if (ObjectUtils.isEmpty(user)) {
+      throw new BusinessException(
+          messageSource.getMessage("user.not.found", null, LocaleContextHolder.getLocale()));
+    }
+    return systemConfigService.updateLoginCaptchaEnabled(enabled);
+  }
+
+  /**
+   * 更新用户的 yt-dlp 自定义参数
+   *
+   * @param userId    用户ID
+   * @param ytDlpArgs 用户自定义参数列表
+   * @return 更新后的参数 JSON 字符串
+   */
+  public String updateYtDlpArgs(String userId, List<String> ytDlpArgs) {
+    User user = userMapper.selectById(userId);
+    if (ObjectUtils.isEmpty(user)) {
+      throw new BusinessException(
+          messageSource.getMessage("user.not.found", null, LocaleContextHolder.getLocale()));
+    }
+
+    List<String> validated = YtDlpArgsValidator.validate(ytDlpArgs);
+    String serialized;
+    try {
+      serialized = objectMapper.writeValueAsString(validated);
+    } catch (JsonProcessingException e) {
+      throw new BusinessException("Failed to serialize yt-dlp args");
+    }
+
+    systemConfigService.updateYtDlpArgs(serialized);
+    return serialized;
+  }
+
+  public OpmlExportFile exportSubscriptionsOpml(ExportFeedsOpmlRequest request) {
+    List<ExportFeedsOpmlRequest.FeedSelection> selectedFeeds = request == null ? null : request.getFeeds();
+    if (CollectionUtils.isEmpty(selectedFeeds)) {
+      throw new BusinessException("No feeds selected");
+    }
+
+    List<OpmlOutline> outlines = new ArrayList<>();
+    String apiKey = getApiKey();
+    String baseUrl = appBaseUrlResolver.requireBaseUrl();
+    for (ExportFeedsOpmlRequest.FeedSelection selection : selectedFeeds) {
+      if (selection == null || !StringUtils.hasText(selection.getId())
+          || !StringUtils.hasText(selection.getType())) {
+        continue;
+      }
+      FeedType feedType = parseFeedType(selection.getType());
+      String feedId = selection.getId().trim();
+      if (feedType == FeedType.CHANNEL) {
+        Channel channel = channelMapper.selectById(feedId);
+        if (channel == null) {
+          continue;
+        }
+        outlines.add(
+            OpmlOutline.builder()
+                .title(resolveFeedTitle(channel.getCustomTitle(), channel.getTitle(), feedId))
+                .xmlUrl(buildRssUrl(feedType, feedId, baseUrl, apiKey))
+                .htmlUrl(FeedSourceUrlBuilder.buildChannelUrl(channel.getSource(), feedId))
+                .category(buildOpmlCategory(channel.getSource(), "channel"))
+                .build());
+      } else if (feedType == FeedType.PLAYLIST) {
+        Playlist playlist = playlistMapper.selectById(feedId);
+        if (playlist == null) {
+          continue;
+        }
+        outlines.add(
+            OpmlOutline.builder()
+                .title(resolveFeedTitle(playlist.getCustomTitle(), playlist.getTitle(), feedId))
+                .xmlUrl(buildRssUrl(feedType, feedId, baseUrl, apiKey))
+                .htmlUrl(IndividualVideoPlaylistSupport.isSingleVideoPlaylist(playlist)
+                    ? IndividualVideoPlaylistSupport.buildConsoleUrl(baseUrl, feedId)
+                    : FeedSourceUrlBuilder.buildPlaylistUrl(
+                        playlist.getSource(), feedId, playlist.getOwnerId()))
+                .category(buildOpmlCategory(playlist.getSource(), "playlist"))
+                .build());
+      }
+    }
+
+    if (outlines.isEmpty()) {
+      throw new BusinessException("No valid feeds selected");
+    }
+
+    User currentUser = getCurrentUser();
+    String ownerName = currentUser != null ? currentUser.getUsername() : "";
+    String content = buildOpmlDocument(outlines, ownerName);
+    String fileName = "pigeonpod-subscriptions-"
+        + LocalDateTime.now().format(DateTimeFormatter.ofPattern("yyyyMMdd-HHmmss")) + ".opml";
+    return OpmlExportFile.builder()
+        .fileName(fileName)
+        .content(content)
+        .build();
+  }
+
+  public SystemConfig getSystemConfig() {
+    return sanitizeSystemConfig(systemConfigService.getCurrentConfig());
+  }
+
+  public SystemConfig updateSystemConfig(SystemConfig incoming) {
+    SystemConfig current = systemConfigService.getCurrentConfig();
+    SystemConfig candidate = systemConfigService.buildCandidate(incoming);
+    if (current.getStorageType() != candidate.getStorageType()) {
+      ensureNoDownloadingTasksForStorageSwitch();
+    }
+    SystemConfig updated = systemConfigService.updateSystemConfig(incoming);
+    runtimeConfigApplier.apply(updated);
+    proxyRuntimeConfigApplier.apply(updated);
+    return sanitizeSystemConfig(updated);
+  }
+
+  public ProxyTestResponse testProxyConfig(SystemConfig incoming) {
+    SystemConfig candidate = systemConfigService.buildCandidate(incoming);
+    OutboundProxyHolder.OutboundProxySettings proxySettings = outboundProxyHolder.from(candidate);
+    if (!proxySettings.enabled()) {
+      throw new BusinessException("proxy is not enabled");
+    }
+    log.info("[config] proxy tests started: route={}", describeProxy(proxySettings));
+
+    ProxyTestItemResponse youtubeApiResult = testYoutubeProxy(candidate, proxySettings);
+    ProxyTestItemResponse ytDlpResult = testYtDlpProxy(candidate);
+    return ProxyTestResponse.builder()
+        .youtubeApi(youtubeApiResult)
+        .ytDlp(ytDlpResult)
+        .build();
+  }
+
+  public StorageSwitchCheckResponse checkStorageSwitchAllowed(StorageType targetType) {
+    if (targetType == null) {
+      return StorageSwitchCheckResponse.builder()
+          .canSwitch(false)
+          .downloadingCount(0L)
+          .message("target storage type is required")
+          .build();
+    }
+
+    StorageType currentType = systemConfigService.getCurrentConfig().getStorageType();
+    if (currentType == targetType) {
+      return StorageSwitchCheckResponse.builder()
+          .canSwitch(true)
+          .downloadingCount(0L)
+          .message(null)
+          .build();
+    }
+
+    Long downloadingCount = countDownloadingTasks();
+    if (downloadingCount != null && downloadingCount > 0) {
+      return StorageSwitchCheckResponse.builder()
+          .canSwitch(false)
+          .downloadingCount(downloadingCount)
+          .message(messageSource.getMessage("system.storage.switch.blocked.downloading", null,
+              LocaleContextHolder.getLocale()))
+          .build();
+    }
+
+    return StorageSwitchCheckResponse.builder()
+        .canSwitch(true)
+        .downloadingCount(0L)
+        .message(null)
+        .build();
+  }
+
+  public void testSystemStorageConfig(SystemConfig incoming) {
+    SystemConfig candidate = systemConfigService.buildCandidate(incoming);
+    try {
+      if (candidate.getStorageType() == StorageType.S3) {
+        s3StorageService.testConnection(candidate);
+        return;
+      }
+
+      testLocalDirectoryWritable(candidate.getStorageTempDir(), "temp-dir");
+      testLocalDirectoryWritable(candidate.getLocalAudioPath(), "audio-path");
+      testLocalDirectoryWritable(candidate.getLocalVideoPath(), "video-path");
+      testLocalDirectoryWritable(candidate.getLocalCoverPath(), "cover-path");
+    } catch (BusinessException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new BusinessException(resolveStorageTestErrorMessage(candidate, e));
+    }
+  }
+
+  public SystemConfig uploadSslCertificate(MultipartFile file) {
+    return uploadSslFile(file, "certificate.pem", true);
+  }
+
+  public SystemConfig uploadSslKey(MultipartFile file) {
+    return uploadSslFile(file, "key.pem", false);
+  }
+
+  private SystemConfig uploadSslFile(MultipartFile file, String fileName, boolean isCert) {
+    if (file == null || file.isEmpty()) {
+      throw new BusinessException("file is empty");
+    }
+    try {
+      Path sslDir = Path.of(mediaPathProperties.getSslFilePath());
+      Files.createDirectories(sslDir);
+      Path target = sslDir.resolve(fileName);
+      Files.copy(file.getInputStream(), target, StandardCopyOption.REPLACE_EXISTING);
+
+      SystemConfig config = systemConfigService.getCurrentConfig();
+      if (isCert) {
+        config.setSslCertificatePath(target.toString());
+      } else {
+        config.setSslKeyPath(target.toString());
+      }
+      systemConfigService.updateSystemConfig(config);
+      return sanitizeSystemConfig(systemConfigService.getCurrentConfig());
+    } catch (IOException e) {
+      throw new BusinessException("failed to upload ssl file: " + e.getMessage());
+    }
+  }
+
+  private void testLocalDirectoryWritable(String rawPath, String fieldName) {
+    if (!StringUtils.hasText(rawPath)) {
+      throw new BusinessException(fieldName + " is required");
+    }
+    try {
+      Path directory = Path.of(rawPath);
+      Files.createDirectories(directory);
+      Path probe = directory.resolve(".pigeonpod-write-test-" + System.currentTimeMillis());
+      Files.writeString(probe, "ok", StandardCharsets.UTF_8);
+      Files.deleteIfExists(probe);
+    } catch (Exception e) {
+      throw new BusinessException("local storage path is not writable: " + rawPath);
+    }
+  }
+
+  private void ensureNoDownloadingTasksForStorageSwitch() {
+    Long downloadingCount = countDownloadingTasks();
+    if (downloadingCount != null && downloadingCount > 0) {
+      throw new BusinessException(messageSource.getMessage(
+          "system.storage.switch.blocked.downloading", null, LocaleContextHolder.getLocale()));
+    }
+  }
+
+  private Long countDownloadingTasks() {
+    LambdaQueryWrapper<Episode> queryWrapper = new LambdaQueryWrapper<>();
+    queryWrapper.eq(Episode::getDownloadStatus, EpisodeStatus.DOWNLOADING.name());
+    return episodeMapper.selectCount(queryWrapper);
+  }
+
+  private String resolveStorageTestErrorMessage(SystemConfig config, Exception exception) {
+    String message = exception == null ? null : exception.getMessage();
+    String lower = message == null ? "" : message.toLowerCase();
+
+    if (lower.contains("access denied")
+        || lower.contains("invalidaccesskeyid")
+        || lower.contains("signaturedoesnotmatch")) {
+      return localize("system.storage.test.s3.access.denied");
+    }
+    if (lower.contains("timeout")) {
+      return localize("system.storage.test.s3.timeout");
+    }
+    if (lower.contains("unknownhost")
+        || lower.contains("name or service not known")
+        || lower.contains("failed to connect")
+        || lower.contains("connection refused")) {
+      return localize("system.storage.test.s3.endpoint.unreachable");
+    }
+
+    if (config != null && config.getStorageType() == StorageType.S3) {
+      if (StringUtils.hasText(message)) {
+        return localize("system.storage.test.s3.failed.with.reason", message);
+      }
+      return localize("system.storage.test.s3.failed");
+    }
+
+    if (StringUtils.hasText(message)) {
+      return localize("system.storage.test.local.failed.with.reason", message);
+    }
+    return localize("system.storage.test.local.failed");
+  }
+
+  private String localize(String key, Object... args) {
+    return messageSource.getMessage(key, args, LocaleContextHolder.getLocale());
+  }
+
+  private ProxyTestItemResponse testYoutubeProxy(SystemConfig candidate,
+      OutboundProxyHolder.OutboundProxySettings proxySettings) {
+    long startedAt = System.currentTimeMillis();
+    try {
+      String youtubeApiKey = StringUtils.hasText(candidate.getYoutubeApiKey())
+          ? candidate.getYoutubeApiKey().trim()
+          : systemConfigService.getYoutubeApiKey();
+      if (!StringUtils.hasText(youtubeApiKey)) {
+        throw new BusinessException("YouTube API key is not set");
+      }
+      log.info(
+          "[youtube-api] proxy test started: route={} connectTimeoutMs={} readTimeoutMs={}",
+          describeProxy(proxySettings), YOUTUBE_PROXY_TEST_CONNECT_TIMEOUT_MS,
+          YOUTUBE_PROXY_TEST_READ_TIMEOUT_MS);
+      HttpRequestInitializer requestInitializer = request -> {
+        request.setConnectTimeout(YOUTUBE_PROXY_TEST_CONNECT_TIMEOUT_MS);
+        request.setReadTimeout(YOUTUBE_PROXY_TEST_READ_TIMEOUT_MS);
+      };
+      proxyExecutionScope.callWithProxy(proxySettings, () -> {
+        youtubeServiceFactory.createClient(proxySettings, requestInitializer)
+            .videos()
+            .list("id")
+            .setId("dQw4w9WgXcQ")
+            .setKey(youtubeApiKey)
+            .execute();
+        return null;
+      });
+      long elapsed = System.currentTimeMillis() - startedAt;
+      log.info("[youtube-api] proxy test completed: elapsedMs={} route={}", elapsed,
+          describeProxy(proxySettings));
+      return ProxyTestItemResponse.builder()
+          .success(true)
+          .message("YouTube Data API request succeeded")
+          .build();
+    } catch (Exception e) {
+      long elapsed = System.currentTimeMillis() - startedAt;
+      String message = resolveProxyErrorMessage(e);
+      log.warn("[youtube-api] proxy test failed: elapsedMs={} route={} reason={}", elapsed,
+          describeProxy(proxySettings), message);
+      log.debug("[youtube-api] proxy test failure details", e);
+      return ProxyTestItemResponse.builder()
+          .success(false)
+          .message(message)
+          .build();
+    }
+  }
+
+  private ProxyTestItemResponse testYtDlpProxy(SystemConfig candidate) {
+    long startedAt = System.currentTimeMillis();
+    YtDlpRuntimeService.YtDlpExecutionContext executionContext =
+        ytDlpRuntimeService.resolveExecutionContext();
+    OutboundProxyHolder.OutboundProxySettings proxySettings = outboundProxyHolder.from(candidate);
+    List<String> command = new ArrayList<>(executionContext.command());
+    ytDlpProxyService.appendProxyArgs(command, candidate);
+    command.add("--ignore-config");
+    command.add("--skip-download");
+    command.add("--simulate");
+    command.add("--no-warnings");
+    command.add("--socket-timeout");
+    command.add("10");
+    command.add("--print");
+    command.add("id");
+    command.add("https://www.youtube.com/watch?v=dQw4w9WgXcQ");
+
+    try {
+      log.info("[yt-dlp] proxy test started: route={} timeoutSeconds={} command={}",
+          describeProxy(proxySettings), YTDLP_PROXY_TEST_TIMEOUT_SECONDS,
+          ytDlpProxyService.redactCommand(command));
+      YtDlpRuntimeService.CommandResult result =
+          ytDlpRuntimeService.runDiagnosticCommand(command, executionContext.environment(),
+              YTDLP_PROXY_TEST_TIMEOUT_SECONDS);
+      if (result.exitCode() == 0) {
+        long elapsed = System.currentTimeMillis() - startedAt;
+        log.info("[yt-dlp] proxy test completed: elapsedMs={} route={}", elapsed,
+            describeProxy(proxySettings));
+        return ProxyTestItemResponse.builder()
+            .success(true)
+            .message("yt-dlp request succeeded")
+            .build();
+      }
+      String output = resolveProxyCommandFailureMessage(result.output());
+      long elapsed = System.currentTimeMillis() - startedAt;
+      log.warn("[yt-dlp] proxy test failed: elapsedMs={} route={} exitCode={} output={}", elapsed,
+          describeProxy(proxySettings), result.exitCode(), abbreviateForLog(output));
+      return ProxyTestItemResponse.builder()
+          .success(false)
+          .message(output)
+          .build();
+    } catch (Exception e) {
+      long elapsed = System.currentTimeMillis() - startedAt;
+      String message = resolveProxyErrorMessage(e);
+      log.warn("[yt-dlp] proxy test failed: elapsedMs={} route={} reason={}", elapsed,
+          describeProxy(proxySettings), message);
+      log.debug("[yt-dlp] proxy test failure details", e);
+      return ProxyTestItemResponse.builder()
+          .success(false)
+          .message(message)
+          .build();
+    }
+  }
+
+  private String resolveProxyErrorMessage(Exception exception) {
+    if (exception == null) {
+      return "unknown error";
+    }
+    Throwable root = exception;
+    while (root.getCause() != null && root.getCause() != root) {
+      root = root.getCause();
+    }
+    String message = StringUtils.hasText(root.getMessage())
+        ? root.getMessage()
+        : exception.getClass().getSimpleName();
+    return normalizeProxyFailureMessage(message);
+  }
+
+  private String resolveProxyCommandFailureMessage(String rawOutput) {
+    if (!StringUtils.hasText(rawOutput)) {
+      return "unknown yt-dlp error";
+    }
+    return normalizeProxyFailureMessage(rawOutput.trim());
+  }
+
+  private String normalizeProxyFailureMessage(String rawMessage) {
+    if (!StringUtils.hasText(rawMessage)) {
+      return "unknown error";
+    }
+    String lower = rawMessage.toLowerCase();
+    if (lower.contains("unable to find valid certification path")
+        || lower.contains("pkix path building failed")
+        || lower.contains("certificate_verify_failed")
+        || lower.contains("certificate verify failed")
+        || lower.contains("unable to get local issuer certificate")) {
+      return localize("system.proxy.test.certificate.untrusted");
+    }
+    if (lower.contains("authentication failed")
+        || lower.contains("proxy authentication required")
+        || lower.contains("407")) {
+      return localize("system.proxy.test.auth.failed");
+    }
+    if (lower.contains("timed out") || lower.contains("timeout")) {
+      return localize("system.proxy.test.timeout");
+    }
+    return rawMessage;
+  }
+
+  private String describeProxy(OutboundProxyHolder.OutboundProxySettings settings) {
+    if (settings == null || !settings.enabled()) {
+      return "proxy=disabled";
+    }
+    return String.format("proxy[type=%s, host=%s, port=%s, auth=%s]",
+        settings.type(), settings.host(), settings.port(), settings.hasAuthentication());
+  }
+
+  private String abbreviateForLog(String value) {
+    if (!StringUtils.hasText(value)) {
+      return value;
+    }
+    String normalized = value.replace('\n', ' ').replace('\r', ' ').trim();
+    if (normalized.length() <= 500) {
+      return normalized;
+    }
+    return normalized.substring(0, 500) + "...";
+  }
+
+  private SystemConfig sanitizeSystemConfig(SystemConfig config) {
+    if (config == null) {
+      return null;
+    }
+    config.setHasS3SecretKey(StringUtils.hasText(config.getS3SecretKey()));
+    config.setS3SecretKey(null);
+    config.setHasProxyPassword(StringUtils.hasText(config.getProxyPassword()));
+    config.setProxyPassword(null);
+    return config;
+  }
+
+  private void ensureMultiUserEnabled() {
+    if (!systemConfigService.isMultiUserEnabled()) {
+      throw new BusinessException("Multi-user management is disabled");
+    }
+  }
+
+  private FeedType parseFeedType(String rawType) {
+    try {
+      return FeedType.valueOf(rawType.trim().toUpperCase());
+    } catch (Exception e) {
+      throw new BusinessException("Invalid feed type: " + rawType);
+    }
+  }
+
+  private String buildRssUrl(FeedType feedType, String feedId, String baseUrl, String apiKey) {
+    if (feedType == FeedType.PLAYLIST) {
+      return baseUrl + "/api/rss/playlist/" + feedId + ".xml?apikey=" + apiKey;
+    }
+    return baseUrl + "/api/rss/" + feedId + ".xml?apikey=" + apiKey;
+  }
+
+  private String resolveFeedTitle(String customTitle, String title, String fallbackId) {
+    if (StringUtils.hasText(customTitle)) {
+      return customTitle.trim();
+    }
+    if (StringUtils.hasText(title)) {
+      return title.trim();
+    }
+    return fallbackId;
+  }
+
+  private String buildOpmlCategory(String source, String feedKind) {
+    String normalizedFeedKind = StringUtils.hasText(feedKind) ? feedKind.trim().toLowerCase() : "feed";
+    return "youtube/" + normalizedFeedKind;
+  }
+
+  private String buildOpmlDocument(List<OpmlOutline> outlines, String ownerName) {
+    String now = DateTimeFormatter.RFC_1123_DATE_TIME.format(ZonedDateTime.now(ZoneOffset.UTC));
+
+    Element root = new Element("opml").setAttribute("version", "2.0");
+    Document document = new Document(root);
+
+    Element head = new Element("head");
+    head.addContent(new Element("title").setText("PigeonPod Subscriptions"));
+    head.addContent(new Element("dateCreated").setText(now));
+    head.addContent(new Element("dateModified").setText(now));
+    if (StringUtils.hasText(ownerName)) {
+      head.addContent(new Element("ownerName").setText(ownerName));
+    }
+    head.addContent(new Element("docs").setText("https://2005.opml.org/spec2.html"));
+    root.addContent(head);
+
+    Element body = new Element("body");
+    for (OpmlOutline outline : outlines) {
+      Element outlineElement = new Element("outline");
+      outlineElement.setAttribute("text", outline.getTitle());
+      outlineElement.setAttribute("title", outline.getTitle());
+      outlineElement.setAttribute("type", "rss");
+      outlineElement.setAttribute("xmlUrl", outline.getXmlUrl());
+      outlineElement.setAttribute("htmlUrl", outline.getHtmlUrl());
+      outlineElement.setAttribute("category", outline.getCategory());
+      body.addContent(outlineElement);
+    }
+    root.addContent(body);
+
+    Format format = Format.getPrettyFormat();
+    format.setEncoding(StandardCharsets.UTF_8.name());
+    return new XMLOutputter(format).outputString(document);
+  }
+
+  @Data
+  @Builder
+  public static class OpmlExportFile {
+
+    private String fileName;
+    private String content;
+  }
+
+  @Data
+  @Builder
+  private static class OpmlOutline {
+
+    private String title;
+    private String xmlUrl;
+    private String htmlUrl;
+    private String category;
+  }
+
+}

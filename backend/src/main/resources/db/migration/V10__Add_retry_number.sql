@@ -1,0 +1,2 @@
+ALTER TABLE episode
+    ADD COLUMN retry_number INTEGER NOT NULL DEFAULT 0;

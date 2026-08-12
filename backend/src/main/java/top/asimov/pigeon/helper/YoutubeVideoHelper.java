@@ -1,0 +1,629 @@
+package top.asimov.pigeon.helper;
+
+import com.google.api.services.youtube.YouTube;
+import com.google.api.services.youtube.model.ChannelListResponse;
+import com.google.api.services.youtube.model.PlaylistItem;
+import com.google.api.services.youtube.model.PlaylistItemListResponse;
+import com.google.api.services.youtube.model.ThumbnailDetails;
+import com.google.api.services.youtube.model.Video;
+import com.google.api.services.youtube.model.VideoListResponse;
+import com.google.api.services.youtube.model.VideoLiveStreamingDetails;
+import java.io.IOException;
+import java.time.Duration;
+import java.time.Instant;
+import java.time.LocalDateTime;
+import java.time.ZoneId;
+import java.util.ArrayList;
+import java.util.Calendar;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Optional;
+import java.util.TimeZone;
+import java.util.function.Function;
+import java.util.function.Predicate;
+import java.util.stream.Collectors;
+import lombok.extern.slf4j.Slf4j;
+import top.asimov.pigeon.config.ProxyExecutionScope;
+import org.springframework.context.MessageSource;
+import org.springframework.stereotype.Component;
+import org.springframework.util.CollectionUtils;
+import org.springframework.util.StringUtils;
+import top.asimov.pigeon.config.YoutubeApiKeyHolder;
+import top.asimov.pigeon.model.constant.Youtube;
+import top.asimov.pigeon.model.entity.Episode;
+import top.asimov.pigeon.model.entity.Episode.EpisodeBuilder;
+import top.asimov.pigeon.model.enums.EpisodeStatus;
+import top.asimov.pigeon.model.enums.YoutubeApiMethod;
+import top.asimov.pigeon.util.KeywordExpressionMatcher;
+
+@Slf4j
+@Component
+public class YoutubeVideoHelper {
+
+  private final MessageSource messageSource;
+  private final YoutubeApiExecutor youtubeApiExecutor;
+  private final YoutubeServiceFactory youtubeServiceFactory;
+  private final ProxyExecutionScope proxyExecutionScope;
+
+  public YoutubeVideoHelper(MessageSource messageSource, YoutubeApiExecutor youtubeApiExecutor,
+      YoutubeServiceFactory youtubeServiceFactory, ProxyExecutionScope proxyExecutionScope) {
+    this.messageSource = messageSource;
+    this.youtubeApiExecutor = youtubeApiExecutor;
+    this.youtubeServiceFactory = youtubeServiceFactory;
+    this.proxyExecutionScope = proxyExecutionScope;
+  }
+
+  /**
+   * 从指定的播放列表获取视频
+   *
+   * @param playlistId    播放列表 ID
+   * @param config        视频获取配置
+   * @param stopCondition 停止抓取的条件
+   * @param skipCondition 跳过当前视频的条件
+   * @return 视频列表
+   * @throws IOException 如果发生 I/O 错误
+   */
+  public List<Episode> fetchVideosFromPlaylist(String playlistId, VideoFetchConfig config,
+      Predicate<PlaylistItem> stopCondition, Predicate<PlaylistItem> skipCondition) throws IOException {
+    try {
+      return proxyExecutionScope.callWithCurrentProxy(() -> {
+        YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
+        String youtubeApiKey = YoutubeApiKeyHolder.requireYoutubeApiKey(messageSource);
+        List<Episode> resultEpisodes = new ArrayList<>();
+        String nextPageToken = "";
+        int currentPage = 0;
+        boolean shouldStop = false;
+
+        while (currentPage < config.maxPagesToCheck()) {
+          long pageSize = 50L;
+          PlaylistItemListResponse response = fetchPlaylistPage(
+              youtubeService, playlistId, pageSize, nextPageToken, youtubeApiKey);
+
+          List<PlaylistItem> pageItems = response.getItems();
+          if (pageItems == null || pageItems.isEmpty()) {
+            log.info("[feed-sync] playlist page fetch stopped: playlistId={} reason=noItems",
+                playlistId);
+            break;
+          }
+
+          currentPage++;
+          if (config.maxPagesToCheck() < Integer.MAX_VALUE) {
+            log.info("[feed-sync] playlist page fetched: playlistId={} page={} count={}",
+                playlistId, currentPage, pageItems.size());
+          }
+
+          List<PlaylistItem> itemsToProcess = new ArrayList<>();
+          List<String> videoIdsToFetch = new ArrayList<>();
+          for (PlaylistItem item : pageItems) {
+            if (stopCondition.test(item)) {
+              shouldStop = true;
+              break;
+            }
+            if (skipCondition.test(item)) {
+              continue;
+            }
+            itemsToProcess.add(item);
+            videoIdsToFetch.add(item.getSnippet().getResourceId().getVideoId());
+          }
+
+          if (shouldStop && itemsToProcess.isEmpty()) {
+            break;
+          }
+
+          Map<String, Video> videoDetailsMap =
+              fetchVideoDetailsInBulk(youtubeService, videoIdsToFetch, youtubeApiKey);
+
+          for (PlaylistItem item : itemsToProcess) {
+            String videoId = item.getSnippet().getResourceId().getVideoId();
+            Video video = videoDetailsMap.get(videoId);
+
+            Optional<Episode> episodeOptional = buildEpisodeIfSyncable(item, video, config);
+            episodeOptional.ifPresent(resultEpisodes::add);
+          }
+
+          if (shouldStop) {
+            break;
+          }
+
+          nextPageToken = response.getNextPageToken();
+          if (nextPageToken == null) {
+            if (config.maxPagesToCheck() < Integer.MAX_VALUE) {
+              log.info("[feed-sync] playlist page fetch stopped: playlistId={} reason=endReached",
+                  playlistId);
+            }
+            break;
+          }
+        }
+
+        if (currentPage >= config.maxPagesToCheck()
+            && config.maxPagesToCheck() < Integer.MAX_VALUE) {
+          log.warn("[feed-sync] playlist page fetch stopped: playlistId={} reason=maxPagesReached maxPages={}",
+              playlistId, config.maxPagesToCheck());
+        }
+
+        return resultEpisodes;
+      });
+    } catch (IOException e) {
+      throw e;
+    } catch (Exception e) {
+      if (e instanceof RuntimeException runtimeException) {
+        throw runtimeException;
+      }
+      throw new IOException(e.getMessage(), e);
+    }
+  }
+
+  /**
+   * 获取频道的上传播放列表 ID
+   *
+   * @param channelId     频道 ID
+   * @param youtubeApiKey YouTube API 密钥
+   * @return 上传播放列表 ID
+   * @throws IOException 如果发生 I/O 错误
+   */
+  public String getUploadsPlaylistId(String channelId, String youtubeApiKey) throws IOException {
+    try {
+      return proxyExecutionScope.callWithCurrentProxy(() -> {
+        YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
+        return getUploadsPlaylistId(youtubeService, channelId, youtubeApiKey);
+      });
+    } catch (IOException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new IOException(e.getMessage(), e);
+    }
+  }
+
+  /**
+   * 如果播放列表项和视频详细信息符合条件，则构建 Episode 对象
+   *
+   * @param item   播放列表项
+   * @param video  视频详细信息
+   * @param config 视频获取配置
+   * @return 如果符合条件，则返回包含 Episode 的 Optional，否则返回空 Optional
+   */
+  public Optional<Episode> buildEpisodeIfSyncable(PlaylistItem item, Video video, VideoFetchConfig config) {
+    if (video == null || video.getSnippet() == null) {
+      return Optional.empty();
+    }
+
+    if (shouldSkipLiveContent(video)) {
+      return Optional.empty();
+    }
+
+    String duration = (video.getContentDetails() != null)
+        ? video.getContentDetails().getDuration()
+        : null;
+    if (!StringUtils.hasText(duration)) {
+      log.warn("[youtube-api] video duration missing: videoId={} title={}", video.getId(),
+          video.getSnippet().getTitle());
+      return Optional.empty();
+    }
+
+    String channelId = config.channelId() != null ? config.channelId()
+        : video.getSnippet().getChannelId();
+    Episode episode = buildEpisodeFromVideo(item, video, channelId, duration);
+    return Optional.of(episode);
+  }
+
+  public Optional<Episode> buildSingleVideoEpisodeIfSyncable(Video video, VideoFetchConfig config) {
+    if (video == null || video.getSnippet() == null) {
+      return Optional.empty();
+    }
+
+    if (shouldSkipLiveContent(video)) {
+      return Optional.empty();
+    }
+
+    String duration = (video.getContentDetails() != null)
+        ? video.getContentDetails().getDuration()
+        : null;
+    if (!StringUtils.hasText(duration)) {
+      log.warn("[youtube-api] video duration missing: videoId={} title={}", video.getId(),
+          video.getSnippet().getTitle());
+      return Optional.empty();
+    }
+
+    if (notMatchesKeywordFilter(video.getSnippet().getTitle(),
+        config.titleContainKeywords(), config.titleExcludeKeywords())) {
+      return Optional.empty();
+    }
+    if (notMatchesKeywordFilter(video.getSnippet().getDescription(),
+        config.descriptionContainKeywords(), config.descriptionExcludeKeywords())) {
+      return Optional.empty();
+    }
+    if (notMatchesDurationFilter(duration, config.minimalDuration(), config.maximumDuration())) {
+      return Optional.empty();
+    }
+
+    String channelId = StringUtils.hasText(config.channelId())
+        ? config.channelId()
+        : video.getSnippet().getChannelId();
+    return Optional.of(buildEpisodeFromVideo(video, channelId, duration));
+  }
+
+  public PlaylistPageFetchResult fetchPlaylistEpisodesPage(String playlistId, String nextPageToken,
+      String channelId, String youtubeApiKey) throws IOException {
+    try {
+      return proxyExecutionScope.callWithCurrentProxy(() -> {
+        YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
+        PlaylistItemListResponse response =
+            fetchPlaylistPage(youtubeService, playlistId, 50L, nextPageToken, youtubeApiKey);
+        List<PlaylistItem> pageItems = response.getItems();
+        if (pageItems == null || pageItems.isEmpty()) {
+          return new PlaylistPageFetchResult(List.of(), null, true);
+        }
+
+        List<String> videoIds = new ArrayList<>(pageItems.size());
+        for (PlaylistItem item : pageItems) {
+          videoIds.add(item.getSnippet().getResourceId().getVideoId());
+        }
+        Map<String, Video> videoDetailsMap =
+            fetchVideoDetailsInBulk(youtubeService, videoIds, youtubeApiKey);
+        VideoFetchConfig config =
+            new VideoFetchConfig(channelId, playlistId, null, null, null, null, null, null, 1);
+
+        List<Episode> episodes = new ArrayList<>();
+        for (PlaylistItem item : pageItems) {
+          String videoId = item.getSnippet().getResourceId().getVideoId();
+          buildEpisodeIfSyncable(item, videoDetailsMap.get(videoId), config).ifPresent(episodes::add);
+        }
+
+        String resolvedNextPageToken = response.getNextPageToken();
+        return new PlaylistPageFetchResult(episodes, resolvedNextPageToken, resolvedNextPageToken == null);
+      });
+    } catch (IOException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new IOException(e.getMessage(), e);
+    }
+  }
+
+  /**
+   * 获取播放列表的单个页面
+   *
+   * @param playlistId    播放列表 ID
+   * @param pageSize      每页大小
+   * @param nextPageToken 下一页的令牌
+   * @param youtubeApiKey YouTube API 密钥
+   * @return 播放列表项列表响应
+   * @throws IOException 如果发生 I/O 错误
+   */
+  public PlaylistItemListResponse fetchPlaylistPage(String playlistId, long pageSize,
+      String nextPageToken, String youtubeApiKey) throws IOException {
+    return fetchPlaylistPage(playlistId, pageSize, nextPageToken, youtubeApiKey, "snippet");
+  }
+
+  public PlaylistItemListResponse fetchPlaylistPage(String playlistId, long pageSize,
+      String nextPageToken, String youtubeApiKey, String part) throws IOException {
+    try {
+      return proxyExecutionScope.callWithCurrentProxy(() -> {
+        YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
+        return fetchPlaylistPage(youtubeService, playlistId, pageSize, nextPageToken, youtubeApiKey, part);
+      });
+    } catch (IOException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new IOException(e.getMessage(), e);
+    }
+  }
+
+  /**
+   * 从 Video 对象构建 Episode 对象
+   *
+   * @param video     YouTube 视频对象
+   * @param channelId 频道 ID
+   * @param duration  视频时长
+   * @return 构建的 Episode 对象
+   */
+  public Episode buildEpisodeFromVideo(PlaylistItem item, Video video, String channelId, String duration) {
+    LocalDateTime publishedAt = LocalDateTime.ofInstant(
+        Instant.ofEpochMilli(video.getSnippet().getPublishedAt().getValue()),
+        ZoneId.systemDefault());
+
+    EpisodeBuilder builder = Episode.builder()
+        .id(video.getId())
+        .channelId(channelId)
+        .sourceChannelId(video.getSnippet().getChannelId())
+        .sourceChannelName(video.getSnippet().getChannelTitle())
+        .sourceChannelUrl(StringUtils.hasText(video.getSnippet().getChannelId())
+            ? Youtube.CHANNEL_URL + video.getSnippet().getChannelId()
+            : null)
+        .title(video.getSnippet().getTitle())
+        .description(video.getSnippet().getDescription())
+        .publishedAt(publishedAt)
+        .duration(duration)
+        .durationSeconds(top.asimov.pigeon.util.EpisodeDurationHelper.parseDurationSeconds(duration))
+        .liveVod(isArchivedLiveVodPro(video))
+        .position(item.getSnippet().getPosition())
+        .downloadStatus(EpisodeStatus.READY.name())
+        .createdAt(LocalDateTime.now());
+
+    applyThumbnails(builder, video.getSnippet().getThumbnails());
+    return builder.build();
+  }
+
+  public Episode buildEpisodeFromVideo(Video video, String channelId, String duration) {
+    LocalDateTime publishedAt = LocalDateTime.ofInstant(
+        Instant.ofEpochMilli(video.getSnippet().getPublishedAt().getValue()),
+        ZoneId.systemDefault());
+
+    EpisodeBuilder builder = Episode.builder()
+        .id(video.getId())
+        .channelId(channelId)
+        .sourceChannelId(video.getSnippet().getChannelId())
+        .sourceChannelName(video.getSnippet().getChannelTitle())
+        .sourceChannelUrl(StringUtils.hasText(video.getSnippet().getChannelId())
+            ? Youtube.CHANNEL_URL + video.getSnippet().getChannelId()
+            : null)
+        .title(video.getSnippet().getTitle())
+        .description(video.getSnippet().getDescription())
+        .publishedAt(publishedAt)
+        .duration(duration)
+        .durationSeconds(top.asimov.pigeon.util.EpisodeDurationHelper.parseDurationSeconds(duration))
+        .liveVod(isArchivedLiveVodPro(video))
+        .position(null)
+        .downloadStatus(EpisodeStatus.READY.name())
+        .createdAt(LocalDateTime.now());
+
+    applyThumbnails(builder, video.getSnippet().getThumbnails());
+    return builder.build();
+  }
+
+  /**
+   * 检查标题是否不符合关键词过滤器
+   *
+   * @param title           视频标题
+   * @param containKeywords 必须包含的关键词
+   * @param excludeKeywords 必须排除的关键词
+   * @return 如果不匹配则返回 true，否则返回 false
+   */
+  public boolean notMatchesKeywordFilter(String title, String containKeywords,
+      String excludeKeywords) {
+    return KeywordExpressionMatcher.notMatchesKeywordFilter(title, containKeywords, excludeKeywords);
+  }
+
+  /**
+   * 检查视频时长是否不符合时长过滤器
+   *
+   * @param duration        视频时长 (ISO 8601 格式)
+   * @param minimalDuration 最小时长（秒）
+   * @param maximumDuration 最长时长（分钟）
+   * @return 如果不匹配则返回 true，否则返回 false
+   */
+  public boolean notMatchesDurationFilter(String duration, Integer minimalDuration,
+      Integer maximumDuration) {
+    if (!StringUtils.hasText(duration)) {
+      return true; // 没有时长信息
+    }
+
+    try {
+      Duration parsedDuration = Duration.parse(duration);
+      long seconds = parsedDuration.toSeconds();
+      long minutes = parsedDuration.toMinutes();
+
+      if (minimalDuration != null && seconds < minimalDuration) {
+        return true;
+      }
+
+      if (maximumDuration != null && minutes > maximumDuration) {
+        return true;
+      }
+
+      return false;
+    } catch (Exception e) {
+      log.warn("[youtube-api] video duration parse failed: duration={}", duration, e);
+      return true;
+    }
+  }
+
+  /**
+   * 批量获取视频详细信息
+   *
+   * @param videoIds 视频 ID 列表
+   * @param apiKey   YouTube API 密钥
+   * @return 视频 ID 到视频详细信息的映射
+   * @throws IOException 如果发生 I/O 错误
+   */
+  public Map<String, Video> fetchVideoDetailsInBulk(List<String> videoIds, String apiKey) throws IOException {
+    try {
+      return proxyExecutionScope.callWithCurrentProxy(() -> {
+        YouTube youtubeService = youtubeServiceFactory.createCurrentClient();
+        return fetchVideoDetailsInBulk(youtubeService, videoIds, apiKey);
+      });
+    } catch (IOException e) {
+      throw e;
+    } catch (Exception e) {
+      throw new IOException(e.getMessage(), e);
+    }
+  }
+
+  private String getUploadsPlaylistId(YouTube youtubeService, String channelId, String youtubeApiKey)
+      throws IOException {
+    YouTube.Channels.List channelRequest = youtubeService.channels().list("contentDetails");
+    channelRequest.setId(channelId).setKey(youtubeApiKey);
+    log.info("[youtube-api] channels.list requested: part=contentDetails channelId={}", channelId);
+    ChannelListResponse channelResponse = youtubeApiExecutor.execute(
+        YoutubeApiMethod.CHANNELS_LIST,
+        channelRequest::execute);
+    return channelResponse.getItems().get(0).getContentDetails().getRelatedPlaylists().getUploads();
+  }
+
+  private PlaylistItemListResponse fetchPlaylistPage(YouTube youtubeService, String playlistId, long pageSize,
+      String nextPageToken, String youtubeApiKey) throws IOException {
+    return fetchPlaylistPage(youtubeService, playlistId, pageSize, nextPageToken, youtubeApiKey, "snippet");
+  }
+
+  private PlaylistItemListResponse fetchPlaylistPage(YouTube youtubeService, String playlistId, long pageSize,
+      String nextPageToken, String youtubeApiKey, String part) throws IOException {
+    String effectivePart = StringUtils.hasText(part) ? part : "snippet";
+    YouTube.PlaylistItems.List request = youtubeService.playlistItems()
+        .list(effectivePart)
+        .setPlaylistId(playlistId)
+        .setMaxResults(pageSize)
+        .setPageToken(nextPageToken)
+        .setKey(youtubeApiKey);
+    log.info("[youtube-api] playlistItems.list requested: part={} playlistId={} maxResults={} pageToken={}",
+        effectivePart, playlistId, pageSize, nextPageToken == null ? "<none>" : nextPageToken);
+    return youtubeApiExecutor.execute(YoutubeApiMethod.PLAYLIST_ITEMS_LIST, request::execute);
+  }
+
+  private Map<String, Video> fetchVideoDetailsInBulk(YouTube youtubeService, List<String> videoIds, String apiKey)
+      throws IOException {
+    if (CollectionUtils.isEmpty(videoIds)) {
+      return Collections.emptyMap();
+    }
+    log.info("[youtube-api] videos.list requested: part=contentDetails,snippet,liveStreamingDetails count={}",
+        videoIds.size());
+    VideoListResponse videoResponse = youtubeApiExecutor.execute(
+        YoutubeApiMethod.VIDEOS_LIST,
+        () -> youtubeService.videos()
+            .list("contentDetails,snippet,liveStreamingDetails")
+            .setId(String.join(",", videoIds))
+            .setKey(apiKey)
+            .execute());
+
+    if (CollectionUtils.isEmpty(videoResponse.getItems())) {
+      return Collections.emptyMap();
+    }
+
+    return videoResponse.getItems().stream()
+        .collect(Collectors.toMap(Video::getId,
+            Function.identity(),
+            (existing, replacement) -> existing
+        ));
+  }
+
+  /**
+   * 检查是否应跳过直播内容
+   *
+   * @param video 视频对象
+   * @return 如果是直播内容则返回 true，否则返回 false
+   */
+  public boolean shouldSkipLiveContent(Video video) {
+    String title = video.getSnippet().getTitle();
+    String videoId = video.getId();
+    String liveBroadcastContent = StringUtils.hasText(video.getSnippet().getLiveBroadcastContent())
+        ? video.getSnippet().getLiveBroadcastContent().trim().toLowerCase()
+        : "";
+
+    if ("live".equals(liveBroadcastContent) || "active".equals(liveBroadcastContent)
+        || "upcoming".equals(liveBroadcastContent)) {
+      log.info("[feed-sync] video skipped: videoId={} title={} reason=liveBroadcast", videoId,
+          title);
+      return true;
+    }
+
+    if (video.getLiveStreamingDetails() != null &&
+        video.getLiveStreamingDetails().getScheduledStartTime() != null &&
+        video.getLiveStreamingDetails().getActualEndTime() == null) {
+      log.info("[feed-sync] video skipped: videoId={} title={} reason=upcomingLive", videoId,
+          title);
+      return true;
+    }
+
+    return false;
+  }
+
+  public boolean isArchivedLiveVod(Video video) {
+    if (video == null || video.getLiveStreamingDetails() == null) {
+      return false;
+    }
+    return video.getLiveStreamingDetails().getActualStartTime() != null
+        && video.getLiveStreamingDetails().getActualEndTime() != null;
+  }
+
+  public boolean isArchivedLiveVodPro(Video video) {
+    // 1. 基础检查：必须包含直播详情且已经结束
+    if (video == null || video.getLiveStreamingDetails() == null) {
+      return false;
+    }
+
+    VideoLiveStreamingDetails details = video.getLiveStreamingDetails();
+    if (details.getActualStartTime() == null || details.getActualEndTime() == null) {
+      return false;
+    }
+
+    // 2. 如果没有预定开始时间，通常是即兴直播，判定为真直播
+    if (details.getScheduledStartTime() == null) {
+      return true;
+    }
+
+    long actualMillis = details.getActualStartTime().getValue();
+    long scheduledMillis = details.getScheduledStartTime().getValue();
+
+    // 3. 计算实际开始时间相对于预定时间的偏差（绝对值，秒）
+    long offsetSeconds = Math.abs(actualMillis - scheduledMillis) / 1000;
+
+    // 4. 获取实际开始时间在分钟内的“秒数”（UTC）
+    Calendar cal = Calendar.getInstance(TimeZone.getTimeZone("UTC"));
+    cal.setTimeInMillis(actualMillis);
+    int actualSeconds = cal.get(Calendar.SECOND);
+
+    /* * 判定逻辑逻辑：
+     * 满足以下【所有】条件的，判定为机器触发的“首播 (Premiere)”：
+     * - 偏差极小（小于 10 秒）：说明是服务器准点自动触发。
+     * - 秒数处于系统延迟区（0 到 9 秒之间）：这是 YouTube 处理首播倒计时到正片切换的典型物理延迟。
+     * * 真正的直播由于是人工手动点击，偏差通常较大，或者秒数非常随机（如 14:00:23）。
+     */
+    // 判定为真正的直播回放
+    return offsetSeconds >= 10 || actualSeconds > 9;
+  }
+
+  /**
+   * 将缩略图 URL 应用于 Episode 构建器
+   *
+   * @param builder    Episode 构建器
+   * @param thumbnails 缩略图详细信息
+   */
+  public void applyThumbnails(EpisodeBuilder builder, ThumbnailDetails thumbnails) {
+    if (thumbnails == null) {
+      return;
+    }
+
+    if (thumbnails.getDefault() != null) {
+      builder.defaultCoverUrl(thumbnails.getDefault().getUrl());
+    }
+
+    String maxCoverUrl = null;
+    if (thumbnails.getMaxres() != null) {
+      maxCoverUrl = thumbnails.getMaxres().getUrl();
+    } else if (thumbnails.getStandard() != null) {
+      maxCoverUrl = thumbnails.getStandard().getUrl();
+    } else if (thumbnails.getHigh() != null) {
+      maxCoverUrl = thumbnails.getHigh().getUrl();
+    } else if (thumbnails.getMedium() != null) {
+      maxCoverUrl = thumbnails.getMedium().getUrl();
+    } else if (thumbnails.getDefault() != null) {
+      maxCoverUrl = thumbnails.getDefault().getUrl();
+    }
+
+    builder.maxCoverUrl(maxCoverUrl);
+  }
+
+  /**
+   * 视频获取配置
+   *
+   * @param channelId                  频道 ID
+   * @param playlistId                 播放列表 ID
+   * @param titleContainKeywords       标题必须包含的关键词
+   * @param titleExcludeKeywords       标题必须排除的关键词
+   * @param descriptionContainKeywords 描述必须包含的关键词
+   * @param descriptionExcludeKeywords 描述必须排除的关键词
+   * @param minimalDuration            最小视频时长（秒）
+   * @param maximumDuration            最长视频时长（分钟）
+   * @param maxPagesToCheck            最大检查页数
+   */
+  public record VideoFetchConfig(String channelId, String playlistId,
+                                 String titleContainKeywords, String titleExcludeKeywords,
+                                 String descriptionContainKeywords, String descriptionExcludeKeywords,
+                                 Integer minimalDuration, Integer maximumDuration,
+                                 int maxPagesToCheck) {
+
+  }
+
+  public record PlaylistPageFetchResult(List<Episode> episodes, String nextPageToken, boolean exhausted) {
+
+  }
+}

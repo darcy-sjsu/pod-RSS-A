@@ -1,0 +1,3906 @@
+import React, { useCallback, useContext, useEffect, useRef, useState } from 'react';
+import { API, showError, showSuccess, formatDateWithPattern } from '../../helpers/index.js';
+import CookieConfigModal from '../../components/CookieConfigModal.jsx';
+import {
+  Alert,
+  Button,
+  Container,
+  Paper,
+  Group,
+  PasswordInput,
+  Stack,
+  Switch,
+  TextInput,
+  Title,
+  Text,
+  Modal,
+  Divider,
+  ActionIcon,
+  Select,
+  MultiSelect,
+  Textarea,
+  List,
+  NumberInput,
+  Radio,
+  Checkbox,
+  Collapse,
+  ScrollArea,
+  SegmentedControl,
+  Table,
+  Badge,
+  Tooltip,
+  Box,
+  FileButton,
+} from '@mantine/core';
+import { UserContext } from '../../context/User/UserContext.jsx';
+import { hasLength, useForm } from '@mantine/form';
+import { useDisclosure } from '@mantine/hooks';
+import {
+  IconCookie,
+  IconEdit,
+  IconLock,
+  IconLockPassword,
+  IconNetwork,
+  IconRefresh,
+  IconEye,
+  IconEyeOff,
+  IconCalendar,
+  IconChevronDown,
+  IconChevronUp,
+  IconCloudUp,
+  IconDownload,
+  IconSettings,
+  IconBell,
+  IconTrash,
+  IconPlus,
+  IconShieldLock,
+} from '@tabler/icons-react';
+import { useTranslation } from 'react-i18next';
+import { DATE_FORMAT_OPTIONS, DEFAULT_DATE_FORMAT } from '../../constants/dateFormats.js';
+import {
+  SUBTITLE_LANGUAGE_OPTIONS,
+  SUBTITLE_FORMAT_OPTIONS,
+} from '../../constants/subtitleLanguages.js';
+
+const NEGATIVE_NUMBER_PATTERN = /^-\d+(\.\d+)?$/;
+
+const quoteTokenIfNeeded = (token) => {
+  if (!/\s/.test(token)) {
+    return token;
+  }
+  return `"${token.replace(/(["\\])/g, '\\$1')}"`;
+};
+
+const tokenizeYtDlpLine = (line) => {
+  if (!line) return [];
+  const trimmed = line.trim();
+  if (!trimmed) return [];
+
+  // 支持简单 shell 风格引号：--arg "value with spaces"
+  const pattern = /"([^"\\]*(?:\\.[^"\\]*)*)"|'([^'\\]*(?:\\.[^'\\]*)*)'|(\S+)/g;
+  const tokens = [];
+  let match;
+
+  while ((match = pattern.exec(trimmed)) !== null) {
+    if (match[1] != null) {
+      tokens.push(match[1].replace(/\\(["\\])/g, '$1'));
+    } else if (match[2] != null) {
+      tokens.push(match[2].replace(/\\(['\\])/g, '$1'));
+    } else if (match[3] != null) {
+      tokens.push(match[3]);
+    }
+  }
+
+  if (tokens.length === 0) {
+    return trimmed.split(/\s+/).filter(Boolean);
+  }
+  return tokens;
+};
+
+const formatYtDlpTokens = (tokens) => {
+  if (!tokens || tokens.length === 0) {
+    return '';
+  }
+
+  const lines = [];
+  let currentLine = [];
+
+  tokens.forEach((rawToken) => {
+    const token = (rawToken || '').trim();
+    if (!token) return;
+
+    const isOption = token.startsWith('-') && !NEGATIVE_NUMBER_PATTERN.test(token);
+    if (isOption) {
+      if (currentLine.length > 0) {
+        lines.push(currentLine.join(' '));
+      }
+      currentLine = [token];
+      return;
+    }
+
+    if (currentLine.length === 0) {
+      currentLine = [quoteTokenIfNeeded(token)];
+    } else {
+      currentLine.push(quoteTokenIfNeeded(token));
+    }
+  });
+
+  if (currentLine.length > 0) {
+    lines.push(currentLine.join(' '));
+  }
+
+  return lines.join('\n');
+};
+
+const formatYtDlpArgsText = (value) => {
+  if (!value) return '';
+  if (Array.isArray(value)) {
+    return formatYtDlpTokens(value);
+  }
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (!trimmed) return '';
+    try {
+      const parsed = JSON.parse(trimmed);
+      if (Array.isArray(parsed)) {
+        return formatYtDlpTokens(parsed);
+      }
+    } catch {
+      // fallback to keep legacy plain-string values readable
+    }
+    return formatYtDlpTokens(trimmed.split('\n').flatMap((line) => tokenizeYtDlpLine(line)));
+  }
+  return '';
+};
+
+const parseYtDlpArgsText = (text) => {
+  if (!text) return [];
+  return text
+    .split('\n')
+    .flatMap((line) => tokenizeYtDlpLine(line))
+    .filter(Boolean);
+};
+
+const parseContentDispositionFilename = (contentDisposition) => {
+  if (!contentDisposition) {
+    return '';
+  }
+  const utf8Match = contentDisposition.match(/filename\*=UTF-8''([^;]+)/i);
+  if (utf8Match && utf8Match[1]) {
+    try {
+      return decodeURIComponent(utf8Match[1]);
+    } catch {
+      return utf8Match[1];
+    }
+  }
+  const simpleMatch = contentDisposition.match(/filename="?([^";]+)"?/i);
+  return simpleMatch && simpleMatch[1] ? simpleMatch[1] : '';
+};
+
+const createDefaultFeedDefaults = () => ({
+  autoDownloadLimit: 3,
+  autoDownloadDelayMinutes: 0,
+  minimumDuration: null,
+  maximumEpisodes: null,
+  audioQuality: null,
+  downloadType: 'AUDIO',
+  videoQuality: '',
+  videoEncoding: '',
+  subtitleLanguages: 'zh,en',
+  subtitleFormat: 'vtt',
+});
+
+const createDefaultSystemConfig = () => ({
+  baseUrl: '',
+  youtubeApiKey: '',
+  ytDlpArgs: '',
+  loginCaptchaEnabled: false,
+  multiUserEnabled: false,
+  youtubeDailyLimitUnits: null,
+  proxyEnabled: false,
+  proxyType: 'HTTP',
+  proxyHost: '',
+  proxyPort: '',
+  proxyUsername: '',
+  proxyPassword: '',
+  hasProxyPassword: false,
+  storageType: 'LOCAL',
+  storageTempDir: '/tmp/pigeon-pod',
+  localAudioPath: '/data/audio/',
+  localVideoPath: '/data/video/',
+  localCoverPath: '/data/cover/',
+  downloadFileNamePattern: '{title}-{id}',
+  sslEnabled: false,
+  sslPort: 8443,
+  sslCertificatePath: '',
+  sslKeyPath: '',
+  httpsOnly: false,
+  s3Endpoint: '',
+  s3Region: 'us-east-1',
+  s3Bucket: '',
+  s3AccessKey: '',
+  s3SecretKey: '',
+  hasS3SecretKey: false,
+  s3PathStyleAccess: true,
+  s3ConnectTimeoutSeconds: 30,
+  s3SocketTimeoutSeconds: 1800,
+  s3ReadTimeoutSeconds: 1800,
+  s3PresignExpireHours: 72,
+});
+
+const createDefaultNotificationConfig = () => ({
+  emailEnabled: false,
+  emailHost: '',
+  emailPort: 587,
+  emailUsername: '',
+  emailPassword: '',
+  emailFrom: '',
+  emailTo: '',
+  emailStarttlsEnabled: true,
+  emailSslEnabled: false,
+  hasEmailPassword: false,
+  webhookEnabled: false,
+  webhookUrl: '',
+  webhookCustomHeaders: '',
+  webhookJsonBody: '',
+});
+
+const toNullableNumber = (value) => {
+  if (value === '' || value == null) {
+    return null;
+  }
+  const numeric = Number(value);
+  return Number.isFinite(numeric) ? numeric : null;
+};
+
+function formatProxySummary(systemConfig, t) {
+  if (!systemConfig?.proxyEnabled) {
+    return t('disabled', { defaultValue: 'Disabled' });
+  }
+  const proxyType = systemConfig.proxyType === 'SOCKS5' ? 'SOCKS5' : 'HTTP/HTTPS';
+  const host = systemConfig.proxyHost?.trim() || t('not_set');
+  const port = systemConfig.proxyPort || t('not_set');
+  return `${proxyType} · ${host}:${port}`;
+}
+
+function formatNotificationSummary(notificationConfig, t) {
+  const channels = [];
+  if (notificationConfig?.emailEnabled) {
+    channels.push(`Email`);
+  }
+  if (notificationConfig?.webhookEnabled) {
+    channels.push(`Webhook`);
+  }
+  if (channels.length === 0) {
+    return t('disabled', { defaultValue: 'Disabled' });
+  }
+  return channels.join(' | ');
+}
+
+function formatSslSummary(systemConfig, t) {
+  if (!systemConfig?.sslEnabled) {
+    return t('disabled', { defaultValue: 'Disabled' });
+  }
+  const port = systemConfig.sslPort || 8443;
+  return `HTTPS · ${port}${systemConfig.httpsOnly ? ` · ${t('https_only_label', { defaultValue: 'HTTPS Only' })}` : ''}`;
+}
+
+function getProxyTestStatusColor(success) {
+  return success ? 'green.6' : 'red.6';
+}
+
+const isLocalDiskPath = (rawPath) => {
+  const value = (rawPath || '').trim();
+  if (!value || value.includes('://')) {
+    return false;
+  }
+  if (value.startsWith('/')) {
+    return true;
+  }
+  return /^[A-Za-z]:[\\/]/.test(value);
+};
+
+const UserSetting = () => {
+  const { t } = useTranslation();
+  const contextValue = useContext(UserContext);
+  const state = Array.isArray(contextValue) ? contextValue[0] : (contextValue?.state || contextValue);
+  const dispatch = Array.isArray(contextValue) ? contextValue[1] : (contextValue?.dispatch || (() => null));
+  const isAdmin = state?.user?.role === 'admin';
+  const [resetPasswordLoading, setResetPasswordLoading] = useState(false);
+  const [resetPasswordOpened, { open: openResetPassword, close: closeResetPassword }] =
+    useDisclosure(false);
+  const [
+    confirmGenerateApiKeyOpened,
+    { open: openConfirmGenerateApiKey, close: closeConfirmGenerateApiKey },
+  ] = useDisclosure(false);
+  const [changeUsernameOpened, { open: openChangeUsername, close: closeChangeUsername }] =
+    useDisclosure(false);
+  const [addUserOpened, { open: openAddUser, close: closeAddUser }] = useDisclosure(false);
+  const [addUserLoading, setAddUserLoading] = useState(false);
+  const [users, setUsers] = useState([]);
+  const [, setUsersLoading] = useState(false);
+  const [adminResetPasswordOpened, { open: openAdminResetPassword, close: closeAdminResetPassword }] = useDisclosure(false);
+  const [adminResetPasswordLoading, setAdminResetPasswordLoading] = useState(false);
+  const [targetUser, setPendingTargetUser] = useState(null);
+  const [confirmDeleteUserOpened, { open: openConfirmDeleteUser, close: closeConfirmDeleteUser }] = useDisclosure(false);
+  const [deleteUserLoading, setDeleteUserLoading] = useState(false);
+
+  const fetchUsers = useCallback(async () => {
+    setUsersLoading(true);
+    try {
+      const res = await API.get('/api/account/users');
+      const { code, msg, data } = res.data;
+      if (code === 200) {
+        setUsers(data);
+      } else {
+        showError(msg);
+      }
+    } finally {
+      setUsersLoading(false);
+    }
+  }, []);
+
+  // API Key visibility states
+  const [showApiKey, setShowApiKey] = useState(false);
+  const [showYoutubeApiKey, setShowYoutubeApiKey] = useState(false);
+
+  // YouTube Data API Key states
+  const [editYoutubeApiKeyOpened, { open: openEditYoutubeApiKey, close: closeEditYoutubeApiKey }] =
+    useDisclosure(false);
+  const [youtubeApiKey, setYoutubeApiKey] = useState('');
+  const [youtubeDailyLimitUnits, setYoutubeDailyLimitUnits] = useState('');
+  const [youtubeQuotaToday, setYoutubeQuotaToday] = useState(null);
+
+  // Cookie upload states
+  const [uploadCookiesOpened, { open: openUploadCookies, close: closeUploadCookies }] =
+    useDisclosure(false);
+  const [cookieConfigs, setCookieConfigs] = useState([]);
+
+  // Date format states
+  const [editDateFormatOpened, { open: openEditDateFormat, close: closeEditDateFormat }] =
+    useDisclosure(false);
+  const [dateFormat, setDateFormat] = useState(state.user?.dateFormat || DEFAULT_DATE_FORMAT);
+  const [editBaseUrlOpened, { open: openEditBaseUrl, close: closeEditBaseUrl }] =
+    useDisclosure(false);
+  const [editNotificationConfigOpened, { open: openEditNotificationConfig, close: closeEditNotificationConfig }] =
+    useDisclosure(false);
+  const [editProxyConfigOpened, { open: openEditProxyConfig, close: closeEditProxyConfig }] =
+    useDisclosure(false);
+  const [editStorageConfigOpened, { open: openEditStorageConfig, close: closeEditStorageConfig }] =
+    useDisclosure(false);
+  const [editSslConfigOpened, { open: openEditSslConfig, close: closeEditSslConfig }] =
+    useDisclosure(false);
+  const [
+    confirmStorageSwitchOpened,
+    { open: openConfirmStorageSwitch, close: closeConfirmStorageSwitch },
+  ] = useDisclosure(false);
+  const [pendingStorageType, setPendingStorageType] = useState(null);
+
+  const [editYtDlpArgsOpened, { open: openEditYtDlpArgs, close: closeEditYtDlpArgs }] =
+    useDisclosure(false);
+  const [editFeedDefaultsOpened, { open: openEditFeedDefaults, close: closeEditFeedDefaults }] =
+    useDisclosure(false);
+  const [applyFeedDefaultsOpened, { open: openApplyFeedDefaults, close: closeApplyFeedDefaults }] =
+    useDisclosure(false);
+  const [ytDlpArgsText, setYtDlpArgsText] = useState('');
+  const [feedDefaults, setFeedDefaults] = useState(createDefaultFeedDefaults);
+  const [applyFeedDefaultsMode, setApplyFeedDefaultsMode] = useState('override_all');
+  const [applyingFeedDefaults, setApplyingFeedDefaults] = useState(false);
+  const [editYtDlpRuntimeOpened, { open: openEditYtDlpRuntime, close: closeEditYtDlpRuntime }] =
+    useDisclosure(false);
+  const [
+    confirmUpdateYtDlpOpened,
+    { open: openConfirmUpdateYtDlp, close: closeConfirmUpdateYtDlp },
+  ] = useDisclosure(false);
+  const [ytDlpRuntime, setYtDlpRuntime] = useState(null);
+  const [ytDlpRuntimeKey, setYtDlpRuntimeKey] = useState('system');
+  const [ytDlpChannel, setYtDlpChannel] = useState('stable');
+  const [ytDlpUpdating, setYtDlpUpdating] = useState(false);
+  const [ytDlpSwitchSubmitting, setYtDlpSwitchSubmitting] = useState(false);
+  const [ytDlpUpdateSubmitting, setYtDlpUpdateSubmitting] = useState(false);
+  const ytDlpStatusRef = useRef(null);
+  const [blockedYtDlpArgs, setBlockedYtDlpArgs] = useState([]);
+  const [loginCaptchaEnabled, setLoginCaptchaEnabled] = useState(false);
+  const [loginCaptchaSaving, setLoginCaptchaSaving] = useState(false);
+  const [exportOpmlOpened, { open: openExportOpml, close: closeExportOpml }] = useDisclosure(false);
+  const [exportFeedsLoading, setExportFeedsLoading] = useState(false);
+  const [exportingOpml, setExportingOpml] = useState(false);
+  const [exportFeedList, setExportFeedList] = useState([]);
+  const [selectedExportFeedKeys, setSelectedExportFeedKeys] = useState([]);
+  const [exportFeedTypeFilter, setExportFeedTypeFilter] = useState('all');
+  const [systemConfig, setSystemConfig] = useState(createDefaultSystemConfig);
+  const isMultiUserEnabled = Boolean(systemConfig.multiUserEnabled);
+  const [systemConfigSaving, setSystemConfigSaving] = useState(false);
+  const [notificationConfig, setNotificationConfig] = useState(createDefaultNotificationConfig);
+  const [notificationConfigSaving, setNotificationConfigSaving] = useState(false);
+  const [systemConfigTesting, setSystemConfigTesting] = useState(false);
+  const [notificationEmailTesting, setNotificationEmailTesting] = useState(false);
+  const [notificationWebhookTesting, setNotificationWebhookTesting] = useState(false);
+  const [notificationChannel, setNotificationChannel] = useState('email');
+  const [proxyTesting, setProxyTesting] = useState(false);
+  const [proxyTestResult, setProxyTestResult] = useState(null);
+  const [storageSwitchChecking, setStorageSwitchChecking] = useState(false);
+  const [storageAdvancedOpened, setStorageAdvancedOpened] = useState(false);
+
+  useEffect(() => {
+    if (isAdmin && isMultiUserEnabled) {
+      fetchUsers().then();
+      return;
+    }
+    setUsers([]);
+  }, [fetchUsers, isAdmin, isMultiUserEnabled]);
+
+  const handleOpenEditStorageConfig = () => {
+    setStorageAdvancedOpened(false);
+    openEditStorageConfig();
+  };
+
+  const handleCloseEditStorageConfig = () => {
+    setStorageAdvancedOpened(false);
+    closeEditStorageConfig();
+  };
+
+  const fetchYoutubeQuotaToday = useCallback(async () => {
+    try {
+      const res = await API.get('/api/account/youtube-quota/today');
+      const { code, data } = res.data;
+      if (code === 200) {
+        setYoutubeQuotaToday(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch YouTube quota:', error);
+    }
+  }, []);
+
+  useEffect(() => {
+    setYtDlpArgsText(formatYtDlpArgsText(systemConfig.ytDlpArgs));
+  }, [systemConfig.ytDlpArgs]);
+
+  useEffect(() => {
+    setYoutubeApiKey(systemConfig.youtubeApiKey || '');
+    setYoutubeDailyLimitUnits(systemConfig.youtubeDailyLimitUnits ?? '');
+  }, [systemConfig.youtubeApiKey, systemConfig.youtubeDailyLimitUnits]);
+
+  useEffect(() => {
+    if (!state.user || !isAdmin) return;
+    const fetchFeedDefaults = async () => {
+      const res = await API.get('/api/account/feed-defaults');
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+
+      setFeedDefaults({
+        autoDownloadLimit: data?.autoDownloadLimit ?? 3,
+        autoDownloadDelayMinutes: data?.autoDownloadDelayMinutes ?? 0,
+        minimumDuration: data?.minimumDuration ?? null,
+        maximumEpisodes: data?.maximumEpisodes ?? null,
+        audioQuality: data?.audioQuality ?? null,
+        downloadType: data?.downloadType || 'AUDIO',
+        videoQuality: data?.videoQuality || '',
+        videoEncoding: data?.videoEncoding || '',
+        subtitleLanguages: data?.subtitleLanguages ?? null,
+        subtitleFormat: data?.subtitleFormat ?? null,
+      });
+    };
+
+    fetchFeedDefaults().catch(() => {});
+  }, [state.user, isAdmin]);
+
+  useEffect(() => {
+    setLoginCaptchaEnabled(Boolean(systemConfig.loginCaptchaEnabled));
+  }, [systemConfig.loginCaptchaEnabled]);
+
+  useEffect(() => {
+    if (!state.user || !editYoutubeApiKeyOpened || !isAdmin) return;
+    fetchYoutubeQuotaToday().then();
+    const interval = setInterval(() => {
+      fetchYoutubeQuotaToday().then();
+    }, 30000);
+    return () => clearInterval(interval);
+  }, [state.user, editYoutubeApiKeyOpened, fetchYoutubeQuotaToday, isAdmin]);
+
+  useEffect(() => {
+    if (!isAdmin) return;
+    const fetchBlockedArgs = async () => {
+      const res = await API.get('/api/account/yt-dlp-args-policy');
+      const { code, data } = res.data;
+      if (code === 200 && Array.isArray(data)) {
+        setBlockedYtDlpArgs(data);
+      }
+    };
+    fetchBlockedArgs().catch(() => {});
+  }, [isAdmin]);
+
+  const fetchSystemConfig = useCallback(async () => {
+    try {
+      if (!isAdmin) return;
+      const res = await API.get('/api/account/system-config');
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      setSystemConfig({
+        ...createDefaultSystemConfig(),
+        ...(data || {}),
+        proxyType: data?.proxyType || 'HTTP',
+        proxyPassword: '',
+        hasProxyPassword: Boolean(data?.hasProxyPassword),
+        s3SecretKey: '',
+        hasS3SecretKey: Boolean(data?.hasS3SecretKey),
+      });
+    } catch (error) {
+      console.error('Failed to fetch system config:', error);
+    }
+  }, [isAdmin]);
+
+  const fetchNotificationConfig = useCallback(async () => {
+    try {
+      if (!isAdmin) return;
+      const res = await API.get('/api/notification/config');
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      setNotificationConfig({
+        ...createDefaultNotificationConfig(),
+        ...(data || {}),
+        emailPassword: '',
+        hasEmailPassword: Boolean(data?.hasEmailPassword),
+      });
+    } catch (error) {
+      console.error('Failed to fetch notification config:', error);
+    }
+  }, [isAdmin]);
+
+  const fetchCookies = useCallback(async () => {
+    try {
+      if (!isAdmin) return;
+      const res = await API.get('/api/cookies');
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      setCookieConfigs(Array.isArray(data) ? data : []);
+    } catch (error) {
+      console.error('Failed to fetch cookies:', error);
+    }
+  }, [isAdmin]);
+
+  useEffect(() => {
+    if (!state.user || !isAdmin) return;
+    fetchSystemConfig().catch(() => {});
+    fetchNotificationConfig().catch(() => {});
+    fetchCookies().catch(() => {});
+  }, [fetchCookies, fetchNotificationConfig, fetchSystemConfig, state.user, isAdmin]);
+
+  const fetchYtDlpRuntime = useCallback(async () => {
+    try {
+      if (!isAdmin) return;
+      const res = await API.get('/api/account/yt-dlp/runtime');
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+
+      setYtDlpRuntime(data);
+      if (data?.channel) {
+        setYtDlpChannel(data.channel);
+      }
+      if (data?.activeRuntimeKey) {
+        setYtDlpRuntimeKey(data.activeRuntimeKey);
+      }
+
+      const stateValue = data?.status?.state || 'IDLE';
+      ytDlpStatusRef.current = stateValue;
+      setYtDlpUpdating(Boolean(data?.updating) || stateValue === 'RUNNING');
+    } catch {
+      showError(
+        t('yt_dlp_runtime_fetch_failed', {
+          defaultValue: 'Failed to load yt-dlp runtime status.',
+        }),
+      );
+    }
+  }, [t, isAdmin]);
+
+  const fetchYtDlpUpdateStatus = useCallback(async () => {
+    try {
+      if (!isAdmin) return;
+      const res = await API.get('/api/account/yt-dlp/update-status');
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+
+      const nextState = data?.state || 'IDLE';
+      const previousState = ytDlpStatusRef.current;
+      ytDlpStatusRef.current = nextState;
+
+      setYtDlpRuntime((prev) => ({
+        ...(prev || {}),
+        status: data,
+        updating: nextState === 'RUNNING',
+      }));
+      setYtDlpUpdating(nextState === 'RUNNING');
+
+      if (previousState === 'RUNNING' && nextState === 'SUCCESS') {
+        showSuccess(
+          t('yt_dlp_update_success', {
+            defaultValue: 'yt-dlp updated successfully.',
+          }),
+        );
+        fetchYtDlpRuntime().catch(() => {});
+      } else if (previousState === 'RUNNING' && nextState === 'FAILED') {
+        const errorMessage =
+          data?.error ||
+          t('yt_dlp_update_failed', {
+            defaultValue: 'yt-dlp update failed.',
+          });
+        showError(errorMessage);
+        fetchYtDlpRuntime().catch(() => {});
+      }
+    } catch {
+      showError(
+        t('yt_dlp_update_status_failed', {
+          defaultValue: 'Failed to refresh yt-dlp update status.',
+        }),
+      );
+    }
+  }, [fetchYtDlpRuntime, t, isAdmin]);
+
+  useEffect(() => {
+    if (!state.user || !isAdmin) return;
+    fetchYtDlpRuntime().catch(() => {});
+  }, [fetchYtDlpRuntime, state.user, isAdmin]);
+
+  useEffect(() => {
+    if (!ytDlpUpdating) return undefined;
+    const timer = setInterval(() => {
+      fetchYtDlpUpdateStatus().catch(() => {});
+    }, 3000);
+    return () => clearInterval(timer);
+  }, [fetchYtDlpUpdateStatus, ytDlpUpdating]);
+
+  const updateYtDlpVersion = async () => {
+    try {
+      setYtDlpUpdateSubmitting(true);
+      const res = await API.post('/api/account/yt-dlp/update', {
+        channel: ytDlpChannel,
+      });
+      const { code, msg, data } = res.data;
+      if (code === 200) {
+        setYtDlpRuntime((prev) => ({
+          ...(prev || {}),
+          channel: ytDlpChannel,
+          status: data,
+          updating: true,
+        }));
+        ytDlpStatusRef.current = 'RUNNING';
+        setYtDlpUpdating(true);
+        closeConfirmUpdateYtDlp();
+        showSuccess(
+          t('yt_dlp_update_started', {
+            defaultValue: 'yt-dlp update started.',
+          }),
+        );
+      } else {
+        showError(msg);
+      }
+    } catch {
+      showError(
+        t('yt_dlp_update_submit_failed', {
+          defaultValue: 'Failed to submit yt-dlp update task.',
+        }),
+      );
+    } finally {
+      setYtDlpUpdateSubmitting(false);
+    }
+  };
+
+  const switchYtDlpRuntime = async () => {
+    try {
+      setYtDlpSwitchSubmitting(true);
+      const res = await API.post('/api/account/yt-dlp/runtime/switch', {
+        runtimeKey: ytDlpRuntimeKey,
+      });
+      const { code, msg, data } = res.data;
+      if (code === 200) {
+        setYtDlpRuntime(data);
+        if (data?.activeRuntimeKey) {
+          setYtDlpRuntimeKey(data.activeRuntimeKey);
+        }
+
+        const stateValue = data?.status?.state || 'IDLE';
+        ytDlpStatusRef.current = stateValue;
+        setYtDlpUpdating(Boolean(data?.updating) || stateValue === 'RUNNING');
+
+        showSuccess(
+          t('yt_dlp_runtime_switch_success', {
+            defaultValue: 'yt-dlp runtime switched successfully.',
+          }),
+        );
+      } else {
+        showError(msg);
+      }
+    } catch {
+      showError(
+        t('yt_dlp_runtime_switch_failed', {
+          defaultValue: 'Failed to switch yt-dlp runtime.',
+        }),
+      );
+    } finally {
+      setYtDlpSwitchSubmitting(false);
+    }
+  };
+
+  const getYtDlpStatusText = (statusValue) => {
+    if (statusValue === 'RUNNING') {
+      return t('yt_dlp_update_running', { defaultValue: 'Updating' });
+    }
+    if (statusValue === 'SUCCESS') {
+      return t('yt_dlp_update_state_success', { defaultValue: 'Success' });
+    }
+    if (statusValue === 'FAILED') {
+      return t('yt_dlp_update_state_failed', { defaultValue: 'Failed' });
+    }
+    return t('yt_dlp_update_state_idle', { defaultValue: 'Idle' });
+  };
+
+  const getYtDlpRuntimeModeText = (mode) => {
+    if (mode === 'MANAGED_PYTHON_MODULE') {
+      return t('yt_dlp_runtime_mode_managed', { defaultValue: 'Managed runtime' });
+    }
+    if (mode === 'SYSTEM_BINARY') {
+      return t('yt_dlp_runtime_mode_system', { defaultValue: 'System binary' });
+    }
+    return t('unknown', { defaultValue: 'Unknown' });
+  };
+
+  const getYtDlpRuntimeOptions = () =>
+    (ytDlpRuntime?.availableRuntimes || []).map((runtime) => ({
+      label: runtime?.label || runtime?.version || runtime?.key,
+      value: runtime?.key,
+    }));
+
+  const getActiveYtDlpRuntimeLabel = () => {
+    const runtime = (ytDlpRuntime?.availableRuntimes || []).find(
+      (item) => item?.key === ytDlpRuntime?.activeRuntimeKey,
+    );
+    if (runtime?.label) {
+      return runtime.label.replace(/\s+\(current\)$/i, '');
+    }
+    return (
+      ytDlpRuntime?.version ||
+      t('yt_dlp_version_unknown', {
+        defaultValue: 'Unknown',
+      })
+    );
+  };
+
+  const getExportFeedKey = (feed) => `${String(feed?.type || '').toUpperCase()}:${feed?.id || ''}`;
+  const normalizeExportFeedType = (feed) => String(feed?.type || '').toLowerCase();
+  const filteredExportFeedList =
+    exportFeedTypeFilter === 'all'
+      ? exportFeedList
+      : exportFeedList.filter((feed) => normalizeExportFeedType(feed) === exportFeedTypeFilter);
+  const selectedExportFeedKeySet = new Set(selectedExportFeedKeys);
+  const selectedVisibleExportFeedCount = filteredExportFeedList.filter((feed) =>
+    selectedExportFeedKeySet.has(getExportFeedKey(feed)),
+  ).length;
+  const getCookiePlatformLabel = () =>
+    t('cookie_platform_youtube', { defaultValue: 'YouTube' });
+
+  const loadExportFeedList = async () => {
+    setExportFeedsLoading(true);
+    try {
+      const res = await API.get('/api/feed/list');
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      const list = Array.isArray(data) ? data : [];
+      setExportFeedList(list);
+      setSelectedExportFeedKeys(list.map((feed) => getExportFeedKey(feed)));
+    } finally {
+      setExportFeedsLoading(false);
+    }
+  };
+
+  const openExportOpmlModal = async () => {
+    openExportOpml();
+    setExportFeedTypeFilter('all');
+    await loadExportFeedList();
+  };
+
+  const selectAllExportFeeds = () => {
+    setSelectedExportFeedKeys((previous) => {
+      const next = new Set(previous);
+      filteredExportFeedList.forEach((feed) => {
+        next.add(getExportFeedKey(feed));
+      });
+      return Array.from(next);
+    });
+  };
+
+  const clearExportFeedSelection = () => {
+    setSelectedExportFeedKeys([]);
+  };
+
+  const exportSelectedFeedsAsOpml = async () => {
+    if (selectedExportFeedKeys.length === 0) {
+      showError(t('export_subscriptions_no_selection'));
+      return;
+    }
+
+    const selectedSet = new Set(selectedExportFeedKeys);
+    const selectedFeeds = exportFeedList
+      .filter((feed) => selectedSet.has(getExportFeedKey(feed)))
+      .map((feed) => ({
+        id: feed.id,
+        type: feed.type,
+      }));
+
+    if (selectedFeeds.length === 0) {
+      showError(t('export_subscriptions_no_selection'));
+      return;
+    }
+
+    setExportingOpml(true);
+    try {
+      const res = await API.post(
+        '/api/account/export-opml',
+        { feeds: selectedFeeds },
+        { responseType: 'blob' },
+      );
+
+      const contentType = String(res.headers?.['content-type'] || '').toLowerCase();
+      if (contentType.includes('application/json')) {
+        const text = await res.data.text();
+        let message = t('export_subscriptions_failed');
+        try {
+          const parsed = JSON.parse(text);
+          message = parsed?.msg || message;
+        } catch {
+          // keep fallback message
+        }
+        showError(message);
+        return;
+      }
+
+      const filenameFromHeader = parseContentDispositionFilename(
+        res.headers?.['content-disposition'],
+      );
+      const fallbackFilename = `pigeonpod-subscriptions-${new Date().toISOString().slice(0, 19).replace(/[:T]/g, '-')}.opml`;
+      const filename = filenameFromHeader || fallbackFilename;
+
+      const blob = new Blob([res.data], { type: 'text/x-opml;charset=utf-8' });
+      const downloadUrl = window.URL.createObjectURL(blob);
+      const anchor = document.createElement('a');
+      anchor.href = downloadUrl;
+      anchor.download = filename;
+      document.body.appendChild(anchor);
+      anchor.click();
+      anchor.remove();
+      window.URL.revokeObjectURL(downloadUrl);
+
+      showSuccess(t('export_subscriptions_success'));
+      closeExportOpml();
+    } finally {
+      setExportingOpml(false);
+    }
+  };
+
+  const resetPassword = async (values) => {
+    setResetPasswordLoading(true);
+    const res = await API.post('/api/account/reset-password', {
+      ...state.user,
+      password: values.oldPassword,
+      newPassword: values.newPassword,
+    });
+    const { code, msg } = res.data;
+    if (code === 200) {
+      showSuccess(t('password_reset_success'));
+      closeResetPassword();
+    } else {
+      showError(msg);
+    }
+    setResetPasswordLoading(false);
+  };
+
+  const generateApiKey = async () => {
+    const res = await API.get('/api/account/generate-api-key');
+    const { code, msg, data } = res.data;
+    if (code === 200) {
+      showSuccess(t('api_key_generated'));
+      // update the apiKey in the context
+      const user = {
+        ...state.user,
+        apiKey: data,
+      };
+      dispatch({
+        type: 'login',
+        payload: user,
+      });
+      localStorage.setItem('user', JSON.stringify(user));
+    } else {
+      showError(msg);
+    }
+  };
+
+  const changeUsername = async (values) => {
+    const res = await API.post('/api/account/change-username', {
+      id: state.user.id,
+      username: values.username,
+    });
+    const { code, msg, data } = res.data;
+    if (code === 200) {
+      showSuccess(t('username_changed_success'));
+      dispatch({ type: 'login', payload: data });
+      localStorage.setItem('user', JSON.stringify(data));
+      closeChangeUsername();
+      changeUsernameForm.reset();
+    } else {
+      showError(msg);
+    }
+  };
+
+  const addUser = async (values) => {
+    setAddUserLoading(true);
+    try {
+      const res = await API.post('/api/account/add-user', {
+        username: values.username,
+        password: values.password,
+      });
+      const { code, msg } = res.data;
+      if (code === 200) {
+        showSuccess(t('user_added_success', { defaultValue: 'User added successfully' }));
+        closeAddUser();
+        addUserForm.reset();
+        fetchUsers();
+      } else {
+        showError(msg);
+      }
+    } finally {
+      setAddUserLoading(false);
+    }
+  };
+
+  const adminResetPassword = async (values) => {
+    setAdminResetPasswordLoading(true);
+    try {
+      const res = await API.post('/api/account/admin/reset-password', {
+        id: targetUser.id,
+        newPassword: values.newPassword,
+      });
+      const { code, msg } = res.data;
+      if (code === 200) {
+        showSuccess(t('password_reset_success'));
+        closeAdminResetPassword();
+        adminResetPasswordForm.reset();
+      } else {
+        showError(msg);
+      }
+    } finally {
+      setAdminResetPasswordLoading(false);
+    }
+  };
+
+  const deleteUser = async () => {
+    setDeleteUserLoading(true);
+    try {
+      const res = await API.delete(`/api/account/user/${targetUser.id}`);
+      const { code, msg } = res.data;
+      if (code === 200) {
+        showSuccess(t('user_deleted_success', { defaultValue: 'User deleted successfully' }));
+        closeConfirmDeleteUser();
+        fetchUsers();
+      } else {
+        showError(msg);
+      }
+    } finally {
+      setDeleteUserLoading(false);
+    }
+  };
+
+  // YouTube API Key functions
+  const saveYoutubeApiKey = async () => {
+    const normalizedDailyLimit =
+      youtubeDailyLimitUnits === '' || youtubeDailyLimitUnits == null
+        ? null
+        : Number(youtubeDailyLimitUnits);
+
+    const res = await API.post('/api/account/update-youtube-api-key', {
+      id: state.user.id,
+      youtubeApiKey: youtubeApiKey,
+      youtubeDailyLimitUnits: normalizedDailyLimit,
+    });
+    const { code, msg, data } = res.data;
+    if (code === 200) {
+      showSuccess(t('youtube_api_key_saved'));
+      setSystemConfig({
+        ...createDefaultSystemConfig(),
+        ...(data || {}),
+        s3SecretKey: '',
+        hasS3SecretKey: Boolean(data?.hasS3SecretKey),
+      });
+      fetchYoutubeQuotaToday().then();
+      closeEditYoutubeApiKey();
+    } else {
+      showError(msg);
+    }
+  };
+
+  const handleUploadCookie = async (platform, file) => {
+    if (!platform || !file) return false;
+
+    try {
+      const fileContent = await file.text();
+      const res = await API.put(`/api/cookies/${platform}`, {
+        cookiesContent: fileContent,
+      });
+      const { code, msg } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return false;
+      }
+
+      showSuccess(
+        t('platform_cookie_upload_success', {
+          platform: getCookiePlatformLabel(platform),
+          defaultValue: '{{platform}} cookies uploaded successfully!',
+        }),
+      );
+      await fetchCookies();
+      return true;
+    } catch {
+      showError(
+        t('unknown_error', {
+          defaultValue: 'Unknown error',
+        }),
+      );
+      return false;
+    }
+  };
+
+  const updateLoginCaptcha = async (enabled) => {
+    const previous = loginCaptchaEnabled;
+    setLoginCaptchaEnabled(enabled);
+    setLoginCaptchaSaving(true);
+    const res = await API.post('/api/account/update-login-captcha', {
+      enabled,
+    });
+    const { code, msg, data } = res.data;
+    if (code === 200) {
+      showSuccess(t('login_captcha_updated'));
+      setLoginCaptchaEnabled(Boolean(data));
+      setSystemConfig((prev) => ({
+        ...prev,
+        loginCaptchaEnabled: Boolean(data),
+      }));
+    } else {
+      showError(msg);
+      setLoginCaptchaEnabled(previous);
+    }
+    setLoginCaptchaSaving(false);
+  };
+
+  const updateMultiUserEnabled = async (enabled) => {
+    setSystemConfigSaving(true);
+
+    try {
+      const payload = {
+        ...buildSystemConfigPayload(),
+        multiUserEnabled: enabled,
+      };
+      const res = await API.post('/api/account/system-config', payload);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+
+      setSystemConfig({
+        ...createDefaultSystemConfig(),
+        ...(data || {}),
+        proxyType: data?.proxyType || 'HTTP',
+        proxyPassword: '',
+        hasProxyPassword: Boolean(data?.hasProxyPassword),
+        s3SecretKey: '',
+        hasS3SecretKey: Boolean(data?.hasS3SecretKey),
+      });
+      showSuccess(t('multi_user_updated', { defaultValue: 'Multi User setting updated' }));
+    } finally {
+      setSystemConfigSaving(false);
+    }
+  };
+
+  const handleDeleteCookie = async (platform) => {
+    if (!platform) return false;
+
+    try {
+      const res = await API.delete(`/api/cookies/${platform}`);
+      const { code, msg } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return false;
+      }
+
+      showSuccess(
+        t('platform_cookie_delete_success', {
+          platform: getCookiePlatformLabel(platform),
+          defaultValue: '{{platform}} cookies deleted successfully!',
+        }),
+      );
+      await fetchCookies();
+      return true;
+    } catch {
+      showError(
+        t('unknown_error', {
+          defaultValue: 'Unknown error',
+        }),
+      );
+      return false;
+    }
+  };
+
+  // Date format functions
+  const saveDateFormat = async () => {
+    const res = await API.post('/api/account/update-date-format', {
+      id: state.user.id,
+      dateFormat: dateFormat,
+    });
+    const { code, msg, data } = res.data;
+    if (code === 200) {
+      showSuccess(t('date_format_saved'));
+      const user = {
+        ...state.user,
+        dateFormat: data,
+      };
+      dispatch({
+        type: 'login',
+        payload: user,
+      });
+      localStorage.setItem('user', JSON.stringify(user));
+      closeEditDateFormat();
+    } else {
+      showError(msg);
+    }
+  };
+
+  const saveFeedDefaults = async (showToast = true) => {
+    const payload = {
+      autoDownloadLimit:
+        feedDefaults.autoDownloadLimit === '' ? null : feedDefaults.autoDownloadLimit,
+      autoDownloadDelayMinutes:
+        feedDefaults.autoDownloadDelayMinutes === '' ? null : feedDefaults.autoDownloadDelayMinutes,
+      minimumDuration: feedDefaults.minimumDuration === '' ? null : feedDefaults.minimumDuration,
+      maximumEpisodes: feedDefaults.maximumEpisodes === '' ? null : feedDefaults.maximumEpisodes,
+      audioQuality: feedDefaults.audioQuality === '' ? null : feedDefaults.audioQuality,
+      downloadType: feedDefaults.downloadType || 'AUDIO',
+      videoQuality: feedDefaults.videoQuality || null,
+      videoEncoding: feedDefaults.videoEncoding || null,
+      subtitleLanguages: feedDefaults.subtitleLanguages || null,
+      subtitleFormat: feedDefaults.subtitleFormat || null,
+    };
+
+    const res = await API.post('/api/account/update-feed-defaults', payload);
+    const { code, msg, data } = res.data;
+    if (code !== 200) {
+      showError(msg);
+      return false;
+    }
+
+    setFeedDefaults({
+      autoDownloadLimit: data?.autoDownloadLimit ?? 3,
+      autoDownloadDelayMinutes: data?.autoDownloadDelayMinutes ?? 0,
+      minimumDuration: data?.minimumDuration ?? null,
+      maximumEpisodes: data?.maximumEpisodes ?? null,
+      audioQuality: data?.audioQuality ?? null,
+      downloadType: data?.downloadType || 'AUDIO',
+      videoQuality: data?.videoQuality || '',
+      videoEncoding: data?.videoEncoding || '',
+      subtitleLanguages: data?.subtitleLanguages ?? null,
+      subtitleFormat: data?.subtitleFormat ?? null,
+    });
+
+    if (showToast) {
+      showSuccess(t('feed_defaults_saved', { defaultValue: 'Feed defaults updated' }));
+    }
+    return true;
+  };
+
+  const applyFeedDefaults = async () => {
+    setApplyingFeedDefaults(true);
+    try {
+      const persisted = await saveFeedDefaults(false);
+      if (!persisted) {
+        return;
+      }
+
+      const res = await API.post('/api/account/apply-feed-defaults', {
+        mode: applyFeedDefaultsMode,
+      });
+      const { code, msg, data } = res.data;
+      if (code === 200) {
+        showSuccess(
+          t('feed_defaults_applied', {
+            defaultValue: 'Applied to {{count}} feeds',
+            count: data?.updatedFeeds ?? 0,
+          }),
+        );
+        closeApplyFeedDefaults();
+        closeEditFeedDefaults();
+      } else {
+        showError(msg);
+      }
+    } finally {
+      setApplyingFeedDefaults(false);
+    }
+  };
+
+  const saveYtDlpArgs = async () => {
+    const res = await API.post('/api/account/update-yt-dlp-args', {
+      id: state.user.id,
+      ytDlpArgs: parseYtDlpArgsText(ytDlpArgsText),
+    });
+    const { code, msg, data } = res.data;
+    if (code === 200) {
+      showSuccess(t('yt_dlp_args_saved', { defaultValue: 'yt-dlp args saved' }));
+      setSystemConfig((prev) => ({
+        ...prev,
+        ytDlpArgs: data,
+      }));
+      closeEditYtDlpArgs();
+    } else {
+      showError(msg);
+    }
+  };
+
+  const buildSystemConfigPayload = () => ({
+    ...systemConfig,
+    multiUserEnabled: Boolean(systemConfig.multiUserEnabled),
+    storageType: systemConfig.storageType || 'LOCAL',
+    baseUrl: systemConfig.baseUrl?.trim() || null,
+    proxyEnabled: Boolean(systemConfig.proxyEnabled),
+    proxyType: systemConfig.proxyType || 'HTTP',
+    proxyHost: systemConfig.proxyHost?.trim() || null,
+    proxyPort: toNullableNumber(systemConfig.proxyPort),
+    proxyUsername: systemConfig.proxyUsername?.trim() || null,
+    proxyPassword: systemConfig.proxyPassword ? systemConfig.proxyPassword.trim() : null,
+    hasProxyPassword: Boolean(systemConfig.hasProxyPassword),
+    storageTempDir: systemConfig.storageTempDir?.trim() || null,
+    localAudioPath: systemConfig.localAudioPath?.trim() || null,
+    localVideoPath: systemConfig.localVideoPath?.trim() || null,
+    localCoverPath: systemConfig.localCoverPath?.trim() || null,
+    downloadFileNamePattern: systemConfig.downloadFileNamePattern?.trim() || null,
+    sslEnabled: Boolean(systemConfig.sslEnabled),
+    sslPort: toNullableNumber(systemConfig.sslPort),
+    sslCertificatePath: systemConfig.sslCertificatePath,
+    sslKeyPath: systemConfig.sslKeyPath,
+    httpsOnly: Boolean(systemConfig.httpsOnly),
+    s3Endpoint: systemConfig.s3Endpoint?.trim() || null,
+    s3Region: systemConfig.s3Region?.trim() || null,
+    s3Bucket: systemConfig.s3Bucket?.trim() || null,
+    s3AccessKey: systemConfig.s3AccessKey?.trim() || null,
+    s3SecretKey: systemConfig.s3SecretKey ? systemConfig.s3SecretKey.trim() : null,
+    hasS3SecretKey: Boolean(systemConfig.hasS3SecretKey),
+    s3PathStyleAccess: Boolean(systemConfig.s3PathStyleAccess),
+    s3ConnectTimeoutSeconds: toNullableNumber(systemConfig.s3ConnectTimeoutSeconds),
+    s3SocketTimeoutSeconds: toNullableNumber(systemConfig.s3SocketTimeoutSeconds),
+    s3ReadTimeoutSeconds: toNullableNumber(systemConfig.s3ReadTimeoutSeconds),
+    s3PresignExpireHours: toNullableNumber(systemConfig.s3PresignExpireHours),
+  });
+
+  const buildNotificationConfigPayload = () => ({
+    ...notificationConfig,
+    emailEnabled: Boolean(notificationConfig.emailEnabled),
+    emailHost: notificationConfig.emailHost?.trim() || null,
+    emailPort: toNullableNumber(notificationConfig.emailPort),
+    emailUsername: notificationConfig.emailUsername?.trim() || null,
+    emailPassword: notificationConfig.emailPassword ? notificationConfig.emailPassword.trim() : null,
+    emailFrom: notificationConfig.emailFrom?.trim() || null,
+    emailTo: notificationConfig.emailTo?.trim() || null,
+    emailStarttlsEnabled: Boolean(notificationConfig.emailStarttlsEnabled),
+    emailSslEnabled: Boolean(notificationConfig.emailSslEnabled),
+    hasEmailPassword: Boolean(notificationConfig.hasEmailPassword),
+    webhookEnabled: Boolean(notificationConfig.webhookEnabled),
+    webhookUrl: notificationConfig.webhookUrl?.trim() || null,
+    webhookCustomHeaders: notificationConfig.webhookCustomHeaders?.trim() || null,
+    webhookJsonBody: notificationConfig.webhookJsonBody?.trim() || null,
+  });
+
+  const saveSystemConfig = async (successMessage) => {
+    const payload = buildSystemConfigPayload();
+    if (payload.storageType === 'S3' && !isLocalDiskPath(payload.storageTempDir || '')) {
+      showError(
+        t('storage_temp_dir_local_disk_only', {
+          defaultValue: 'Temp directory must be a local disk path, such as /tmp/pigeon-pod.',
+        }),
+      );
+      return false;
+    }
+    setSystemConfigSaving(true);
+    try {
+      const res = await API.post('/api/account/system-config', payload);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return false;
+      }
+      showSuccess(successMessage);
+      setSystemConfig({
+        ...createDefaultSystemConfig(),
+        ...(data || {}),
+        proxyType: data?.proxyType || 'HTTP',
+        proxyPassword: '',
+        hasProxyPassword: Boolean(data?.hasProxyPassword),
+        s3SecretKey: '',
+        hasS3SecretKey: Boolean(data?.hasS3SecretKey),
+      });
+      return true;
+    } finally {
+      setSystemConfigSaving(false);
+    }
+  };
+
+  const handleSslFileUpload = async (type, file) => {
+    if (!file) return;
+    const formData = new FormData();
+    formData.append('file', file);
+
+    const endpoint =
+      type === 'cert'
+        ? '/api/account/system-config/ssl/upload-cert'
+        : '/api/account/system-config/ssl/upload-key';
+
+    try {
+      const res = await API.post(endpoint, formData, {
+        headers: { 'Content-Type': 'multipart/form-data' },
+      });
+      const { code, msg, data } = res.data;
+      if (code === 200) {
+        showSuccess(t('ssl_file_uploaded_success', { defaultValue: 'SSL file uploaded successfully' }));
+        setSystemConfig({
+          ...createDefaultSystemConfig(),
+          ...(data || {}),
+          proxyType: data?.proxyType || 'HTTP',
+          proxyPassword: '',
+          hasProxyPassword: Boolean(data?.hasProxyPassword),
+          s3SecretKey: '',
+          hasS3SecretKey: Boolean(data?.hasS3SecretKey),
+        });
+      } else {
+        showError(msg);
+      }
+    } catch (error) {
+      console.error('Failed to upload SSL file:', error);
+      showError(t('ssl_file_upload_failed', { defaultValue: 'Failed to upload SSL file' }));
+    }
+  };
+
+  const saveNotificationConfig = async (successMessage) => {
+    const payload = buildNotificationConfigPayload();
+    setNotificationConfigSaving(true);
+    try {
+      const res = await API.post('/api/notification/config', payload);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return false;
+      }
+      showSuccess(successMessage);
+      setNotificationConfig({
+        ...createDefaultNotificationConfig(),
+        ...(data || {}),
+        emailPassword: '',
+        hasEmailPassword: Boolean(data?.hasEmailPassword),
+      });
+      return true;
+    } finally {
+      setNotificationConfigSaving(false);
+    }
+  };
+
+  const testProxyConfig = async () => {
+    const payload = buildSystemConfigPayload();
+    if (!payload.proxyEnabled) {
+      showError(
+        t('proxy_must_be_enabled_before_test', {
+          defaultValue: 'Enable the proxy before running the proxy test.',
+        }),
+      );
+      return;
+    }
+    setProxyTesting(true);
+    try {
+      const res = await API.post('/api/account/system-config/proxy/test', payload);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      setProxyTestResult(data || null);
+      const youtubeOk = Boolean(data?.youtubeApi?.success);
+      const ytDlpOk = Boolean(data?.ytDlp?.success);
+      if (youtubeOk && ytDlpOk) {
+        showSuccess(
+          t('proxy_test_all_success', {
+            defaultValue: 'YouTube Data API and yt-dlp proxy tests both succeeded.',
+          }),
+        );
+      } else {
+        showError(
+          t('proxy_test_partial_failed', {
+            defaultValue: 'One or more proxy tests failed. Check the detailed results below.',
+          }),
+        );
+      }
+    } finally {
+      setProxyTesting(false);
+    }
+  };
+
+  const testSystemStorageConfig = async () => {
+    const payload = buildSystemConfigPayload();
+    if (payload.storageType === 'S3' && !isLocalDiskPath(payload.storageTempDir || '')) {
+      showError(
+        t('storage_temp_dir_local_disk_only', {
+          defaultValue: 'Temp directory must be a local disk path, such as /tmp/pigeon-pod.',
+        }),
+      );
+      return;
+    }
+    setSystemConfigTesting(true);
+    try {
+      const res = await API.post('/api/account/system-config/storage/test', payload);
+      const { code, msg } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      showSuccess(
+        t('storage_connection_test_success', {
+          defaultValue: 'Storage connection test succeeded.',
+        }),
+      );
+    } finally {
+      setSystemConfigTesting(false);
+    }
+  };
+
+  const testNotificationEmail = async () => {
+    const payload = buildNotificationConfigPayload();
+    if (!payload.emailEnabled) {
+      showError(
+        t('notification_email_enable_before_test'),
+      );
+      return;
+    }
+    setNotificationEmailTesting(true);
+    try {
+      const res = await API.post('/api/notification/test/email', payload);
+      const { code, msg } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      showSuccess(
+        t('notification_email_test_success'),
+      );
+    } finally {
+      setNotificationEmailTesting(false);
+    }
+  };
+
+  const testNotificationWebhook = async () => {
+    const payload = buildNotificationConfigPayload();
+    if (!payload.webhookEnabled) {
+      showError(
+        t('notification_webhook_enable_before_test'),
+      );
+      return;
+    }
+    setNotificationWebhookTesting(true);
+    try {
+      const res = await API.post('/api/notification/test/webhook', payload);
+      const { code, msg } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      showSuccess(
+        t('notification_webhook_test_success'),
+      );
+    } finally {
+      setNotificationWebhookTesting(false);
+    }
+  };
+
+  const changeStorageType = async (nextType) => {
+    if (!nextType || nextType === systemConfig.storageType) {
+      return;
+    }
+    setStorageSwitchChecking(true);
+    try {
+      const res = await API.get('/api/account/system-config/storage/switch-check', {
+        params: { targetType: nextType },
+      });
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      if (!data?.canSwitch) {
+        showError(
+          data?.message ||
+            t('storage_switch_check_failed', {
+              defaultValue: 'Storage strategy cannot be switched at the moment.',
+            }),
+        );
+        return;
+      }
+    } finally {
+      setStorageSwitchChecking(false);
+    }
+    setPendingStorageType(nextType);
+    openConfirmStorageSwitch();
+  };
+
+  const confirmStorageTypeSwitch = () => {
+    if (!pendingStorageType) {
+      closeConfirmStorageSwitch();
+      return;
+    }
+    setSystemConfig((prev) => ({
+      ...prev,
+      storageType: pendingStorageType,
+    }));
+    setPendingStorageType(null);
+    closeConfirmStorageSwitch();
+  };
+
+  const cancelStorageTypeSwitch = () => {
+    setPendingStorageType(null);
+    closeConfirmStorageSwitch();
+  };
+
+  const resetPasswordForm = useForm({
+    mode: 'uncontrolled',
+    initialValues: {
+      oldPassword: '',
+      newPassword: '',
+    },
+    validate: {
+      oldPassword: hasLength({ min: 6 }, t('old_password_validation')),
+      newPassword: hasLength({ min: 6 }, t('new_password_validation')),
+    },
+  });
+
+  const changeUsernameForm = useForm({
+    mode: 'uncontrolled',
+    initialValues: {
+      username: '',
+    },
+    validate: {
+      username: (value) =>
+        value.length >= 3 && value.length <= 20
+          ? null
+          : t('username_validation', { defaultValue: 'Username must be between 3 and 20 characters' }),
+    },
+  });
+
+  const addUserForm = useForm({
+    mode: 'uncontrolled',
+    initialValues: {
+      username: '',
+      password: '',
+      confirmPassword: '',
+    },
+    validate: {
+      username: (value) =>
+        value.length >= 3 && value.length <= 20
+          ? null
+          : t('username_validation', { defaultValue: 'Username must be between 3 and 20 characters' }),
+      password: hasLength({ min: 6 }, t('new_password_validation', { defaultValue: 'Password must be at least 6 characters' })),
+      confirmPassword: (value, values) =>
+        value !== values.password ? t('passwords_do_not_match', { defaultValue: 'Passwords do not match' }) : null,
+    },
+  });
+
+  const adminResetPasswordForm = useForm({
+    mode: 'uncontrolled',
+    initialValues: {
+      newPassword: '',
+      confirmPassword: '',
+    },
+    validate: {
+      newPassword: hasLength({ min: 6 }, t('new_password_validation')),
+      confirmPassword: (value, values) =>
+        value !== values.newPassword ? t('passwords_do_not_match') : null,
+    },
+  });
+
+  return (
+    <Container size="lg" my="lg">
+      {!state?.user ? (
+        <Stack>
+          <Paper p="md">
+            <Text c="dimmed">{t('loading')}...</Text>
+          </Paper>
+        </Stack>
+      ) : (
+        <Stack>
+          <Paper p="md">
+            <Stack>
+              <Title order={4}>{t('account_setting')}</Title>
+              <Title order={6}>{t('setting_group_account')}</Title>
+              <Group>
+                <Text c="dimmed">{t('username')}:</Text>
+                <Text>{state.user?.username}</Text>
+                <ActionIcon
+                  variant="transparent"
+                  size="sm"
+                  aria-label="Edit Username"
+                  onClick={openChangeUsername}
+                >
+                  <IconEdit size={18} />
+                </ActionIcon>
+                <ActionIcon
+                  variant="transparent"
+                  size="sm"
+                  aria-label="Reset Password"
+                  onClick={openResetPassword}
+                >
+                  <IconLockPassword size={18} />
+                </ActionIcon>
+              </Group>
+              <Divider hiddenFrom="sm" />
+
+              <Group>
+                <Text c="dimmed">API Key:</Text>
+                <ActionIcon
+                  variant="transparent"
+                  size="sm"
+                  aria-label="Regenerate API Key"
+                  onClick={openConfirmGenerateApiKey}
+                  hiddenFrom="sm"
+                >
+                  <IconRefresh size={18} />
+                </ActionIcon>
+                {state.user?.apiKey ? (
+                  <PasswordInput
+                    value={state.user.apiKey}
+                    readOnly
+                    variant="unstyled"
+                    size="sm"
+                    style={{ flex: 1, maxWidth: '300px' }}
+                    visible={showApiKey}
+                    onVisibilityChange={setShowApiKey}
+                    rightSection={
+                      <ActionIcon
+                        variant="transparent"
+                        size="sm"
+                        onClick={() => setShowApiKey(!showApiKey)}
+                        aria-label="Toggle API Key visibility"
+                      >
+                        {showApiKey ? <IconEyeOff size={20} /> : <IconEye size={20} />}
+                      </ActionIcon>
+                    }
+                  />
+                ) : (
+                  <Text c="dimmed">{t('not_set')}</Text>
+                )}
+                <ActionIcon
+                  variant="transparent"
+                  size="sm"
+                  aria-label="Regenerate API Key"
+                  onClick={openConfirmGenerateApiKey}
+                  visibleFrom="sm"
+                >
+                  <IconRefresh size={18} />
+                </ActionIcon>
+              </Group>
+              <Divider hiddenFrom="sm" />
+
+              <Group>
+                <Text c="dimmed">{t('date_format')}:</Text>
+                <ActionIcon
+                  variant="transparent"
+                  size="sm"
+                  aria-label="Edit Date Format"
+                  onClick={openEditDateFormat}
+                  hiddenFrom="sm"
+                >
+                  <IconEdit size={18} />
+                </ActionIcon>
+                <Text>{state.user?.dateFormat || DEFAULT_DATE_FORMAT}</Text>
+                <ActionIcon
+                  variant="transparent"
+                  size="sm"
+                  aria-label="Edit Date Format"
+                  onClick={openEditDateFormat}
+                  visibleFrom="sm"
+                >
+                  <IconEdit size={18} />
+                </ActionIcon>
+              </Group>
+              <Divider hiddenFrom="sm" />
+              {isAdmin && (
+                <>
+                  <Divider />
+                  <Title order={6}>{t('setting_group_system')}</Title>
+                  <Group>
+                    <Text c="dimmed">YouTube API Key:</Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Youtube Api Key"
+                      onClick={openEditYoutubeApiKey}
+                      hiddenFrom="sm"
+                    >
+                      <IconEdit size={18} />
+                    </ActionIcon>
+                    {systemConfig.youtubeApiKey ? (
+                      <PasswordInput
+                        value={systemConfig.youtubeApiKey}
+                        readOnly
+                        variant="unstyled"
+                        size="sm"
+                        style={{ flex: 1, maxWidth: '300px' }}
+                        visible={showYoutubeApiKey}
+                        onVisibilityChange={setShowYoutubeApiKey}
+                        rightSection={
+                          <ActionIcon
+                            variant="transparent"
+                            size="sm"
+                            onClick={() => setShowYoutubeApiKey(!showYoutubeApiKey)}
+                            aria-label="Toggle YouTube API Key visibility"
+                          >
+                            {showYoutubeApiKey ? <IconEyeOff size={20} /> : <IconEye size={20} />}
+                          </ActionIcon>
+                        }
+                      />
+                    ) : (
+                      <Text c="dimmed">{t('youtube_api_key_not_set')}</Text>
+                    )}
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Youtube Api Key"
+                      onClick={openEditYoutubeApiKey}
+                      visibleFrom="sm"
+                    >
+                      <IconEdit size={18} />
+                    </ActionIcon>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">{t('cookies', { defaultValue: 'Cookies' })}:</Text>
+                    <Button
+                      size="xs"
+                      variant="default"
+                      leftSection={<IconCookie size={14} />}
+                      onClick={openUploadCookies}
+                    >
+                      {t('manage_cookies', { defaultValue: 'Manage Cookies' })}
+                    </Button>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">{t('multi_user', { defaultValue: 'Multi User' })}:</Text>
+                    <Switch
+                      checked={isMultiUserEnabled}
+                      onChange={(event) => {
+                        updateMultiUserEnabled(event.currentTarget.checked).then();
+                      }}
+                      disabled={systemConfigSaving}
+                    />
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">{t('base_url_label', { defaultValue: 'Base URL' })}:</Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Base URL"
+                      onClick={openEditBaseUrl}
+                      hiddenFrom="sm"
+                    >
+                      <IconEdit size={18} />
+                    </ActionIcon>
+                    <Text>{systemConfig.baseUrl?.trim() || t('not_set')}</Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Base URL"
+                      onClick={openEditBaseUrl}
+                      visibleFrom="sm"
+                    >
+                      <IconEdit size={18} />
+                    </ActionIcon>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">
+                      {t('network_proxy_label', { defaultValue: 'Network proxy' })}:
+                    </Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Network Proxy"
+                      onClick={() => {
+                        setProxyTestResult(null);
+                        openEditProxyConfig();
+                      }}
+                      hiddenFrom="sm"
+                    >
+                      <IconNetwork size={18} />
+                    </ActionIcon>
+                    <Text>{formatProxySummary(systemConfig, t)}</Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Network Proxy"
+                      onClick={() => {
+                        setProxyTestResult(null);
+                        openEditProxyConfig();
+                      }}
+                      visibleFrom="sm"
+                    >
+                      <IconNetwork size={18} />
+                    </ActionIcon>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">{t('notification_label')}:</Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Notifications"
+                      onClick={openEditNotificationConfig}
+                      hiddenFrom="sm"
+                    >
+                      <IconBell size={18} />
+                    </ActionIcon>
+                    <Text>{formatNotificationSummary(notificationConfig, t)}</Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Notifications"
+                      onClick={openEditNotificationConfig}
+                      visibleFrom="sm"
+                    >
+                      <IconBell size={18} />
+                    </ActionIcon>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">
+                      {t('storage_strategy_label', { defaultValue: 'Storage strategy' })}:
+                    </Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Storage Strategy"
+                      onClick={handleOpenEditStorageConfig}
+                      hiddenFrom="sm"
+                    >
+                      <IconEdit size={18} />
+                    </ActionIcon>
+                    <Text>
+                      {systemConfig.storageType === 'S3'
+                        ? `S3${systemConfig.s3Bucket ? ` · ${systemConfig.s3Bucket}` : ''}`
+                        : 'LOCAL'}
+                    </Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit Storage Strategy"
+                      onClick={handleOpenEditStorageConfig}
+                      visibleFrom="sm"
+                    >
+                      <IconEdit size={18} />
+                    </ActionIcon>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">
+                      {t('ssl_settings_label', { defaultValue: 'HTTPS Settings' })}:
+                    </Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit HTTPS Settings"
+                      onClick={openEditSslConfig}
+                      hiddenFrom="sm"
+                    >
+                      <IconShieldLock size={18} />
+                    </ActionIcon>
+                    <Text>{formatSslSummary(systemConfig, t)}</Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit HTTPS Settings"
+                      onClick={openEditSslConfig}
+                      visibleFrom="sm"
+                    >
+                      <IconShieldLock size={18} />
+                    </ActionIcon>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+                </>
+              )}
+              {isAdmin && (
+                <>
+                  <Group>
+                    <Text c="dimmed">{t('feed_defaults', { defaultValue: 'Feed defaults' })}:</Text>
+                    <Button size="xs" variant="default" onClick={openEditFeedDefaults} leftSection={<IconSettings size={14}/>}>
+                      {t('setup', { defaultValue: 'Setup' })}
+                    </Button>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">{t('export_subscriptions_opml')}:</Text>
+                    <Button
+                      size="xs"
+                      variant="default"
+                      leftSection={<IconDownload size={14} />}
+                      onClick={() => {
+                        openExportOpmlModal().then();
+                      }}
+                    >
+                      {t('export_subscriptions_action')}
+                    </Button>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">{t('login_captcha')}:</Text>
+                    <Switch
+                      checked={loginCaptchaEnabled}
+                      onChange={(event) => {
+                        const enabled = event.currentTarget.checked;
+                        updateLoginCaptcha(enabled).then();
+                      }}
+                      disabled={loginCaptchaSaving}
+                    />
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">{t('yt_dlp_args', { defaultValue: 'yt-dlp args' })}:</Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit yt-dlp arguments"
+                      onClick={openEditYtDlpArgs}
+                      hiddenFrom="sm"
+                    >
+                      <IconEdit size={18} />
+                    </ActionIcon>
+                    <Text>
+                      {ytDlpArgsText ? t('customized', { defaultValue: 'Customized' }) : t('not_set')}
+                    </Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Edit yt-dlp arguments"
+                      onClick={openEditYtDlpArgs}
+                      visibleFrom="sm"
+                    >
+                      <IconEdit size={18} />
+                    </ActionIcon>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+
+                  <Group>
+                    <Text c="dimmed">
+                      {t('yt_dlp_runtime_label', { defaultValue: 'yt-dlp version' })}:
+                    </Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Manage yt-dlp version"
+                      onClick={openEditYtDlpRuntime}
+                      hiddenFrom="sm"
+                    >
+                      <IconCloudUp size={18} />
+                    </ActionIcon>
+                    <Text>
+                      {getActiveYtDlpRuntimeLabel()}
+                      {' | '}
+                      {getYtDlpStatusText(ytDlpRuntime?.status?.state)}
+                    </Text>
+                    <ActionIcon
+                      variant="transparent"
+                      size="sm"
+                      aria-label="Manage yt-dlp version"
+                      onClick={openEditYtDlpRuntime}
+                      visibleFrom="sm"
+                    >
+                      <IconCloudUp size={18} />
+                    </ActionIcon>
+                  </Group>
+                  <Divider hiddenFrom="sm" />
+                </>
+              )}
+              {isAdmin && isMultiUserEnabled && (
+                <>
+                  <Divider />
+                  <Group justify="space-between">
+                    <Title order={6}>{t('user_management', { defaultValue: 'User Management' })}</Title>
+                    <Button size="xs" variant="light" onClick={openAddUser} leftSection={<IconPlus size={14} />}>
+                      {t('add_user', { defaultValue: 'Add User' })}
+                    </Button>
+                  </Group>
+                  <Box style={{ overflowX: 'auto' }}>
+                    <Table verticalSpacing="xs" style={{ minWidth: 720, tableLayout: 'fixed' }}>
+                      <Table.Thead>
+                        <Table.Tr>
+                          <Table.Th style={{ width: '30%' }}>{t('username')}</Table.Th>
+                          <Table.Th style={{ width: '22%' }}>{t('role', { defaultValue: 'Role' })}</Table.Th>
+                          <Table.Th style={{ width: '28%' }}>{t('created_at', { defaultValue: 'Created At' })}</Table.Th>
+                          <Table.Th style={{ width: '20%', textAlign: 'right' }}>{t('actions', { defaultValue: 'Actions' })}</Table.Th>
+                        </Table.Tr>
+                      </Table.Thead>
+                      <Table.Tbody>
+                        {users.map((u) => (
+                          <Table.Tr key={u.id} style={{ height: 56 }}>
+                            <Table.Td style={{ verticalAlign: 'middle' }}>
+                              <Group gap="sm">
+                                <Text size="sm" fw={500}>
+                                  {u.username}
+                                </Text>
+                              </Group>
+                            </Table.Td>
+                            <Table.Td style={{ verticalAlign: 'middle' }}>
+                              <Badge color={u.role === 'admin' ? 'red' : 'blue'} variant="light">
+                                {u.role}
+                              </Badge>
+                            </Table.Td>
+                            <Table.Td style={{ verticalAlign: 'middle' }}>
+                              <Text size="sm" c="dimmed">
+                                {formatDateWithPattern(u.createdAt, dateFormat)}
+                              </Text>
+                            </Table.Td>
+                            <Table.Td style={{ verticalAlign: 'middle' }}>
+                              <Group gap={0} justify="flex-end">
+                                <Tooltip label={t('reset_password')}>
+                                  <ActionIcon
+                                    variant="subtle"
+                                    color="gray"
+                                    onClick={() => {
+                                      setPendingTargetUser(u);
+                                      openAdminResetPassword();
+                                    }}
+                                  >
+                                    <IconLockPassword size={16} />
+                                  </ActionIcon>
+                                </Tooltip>
+                                {u.id !== '0' && u.id !== state.user?.id && (
+                                  <Tooltip label={t('delete')}>
+                                    <ActionIcon
+                                      variant="subtle"
+                                      color="red"
+                                      onClick={() => {
+                                        setPendingTargetUser(u);
+                                        openConfirmDeleteUser();
+                                      }}
+                                    >
+                                      <IconTrash size={16} />
+                                    </ActionIcon>
+                                  </Tooltip>
+                                )}
+                              </Group>
+                            </Table.Td>
+                          </Table.Tr>
+                        ))}
+                      </Table.Tbody>
+                    </Table>
+                  </Box>
+                </>
+              )}
+            </Stack>
+          </Paper>
+        </Stack>
+      )}
+
+      {/* Add User Modal */}
+      <Modal opened={addUserOpened} onClose={closeAddUser} title={t('add_user', { defaultValue: 'Add User' })}>
+        <form onSubmit={addUserForm.onSubmit((values) => addUser(values))}>
+          <TextInput
+            name="username"
+            label={t('username')}
+            withAsterisk
+            placeholder={t('enter_username', { defaultValue: 'Enter username' })}
+            key={addUserForm.key('username')}
+            {...addUserForm.getInputProps('username')}
+            style={{ flex: 1 }}
+          />
+          <PasswordInput
+            mt="sm"
+            name="password"
+            label={t('password', { defaultValue: 'Password' })}
+            withAsterisk
+            leftSection={<IconLock size={16} />}
+            placeholder={t('enter_password', { defaultValue: 'Enter password' })}
+            key={addUserForm.key('password')}
+            {...addUserForm.getInputProps('password')}
+            style={{ flex: 1 }}
+          />
+          <PasswordInput
+            mt="sm"
+            name="confirmPassword"
+            label={t('confirm_password', { defaultValue: 'Confirm password' })}
+            withAsterisk
+            leftSection={<IconLock size={16} />}
+            placeholder={t('confirm_password', { defaultValue: 'Confirm password' })}
+            key={addUserForm.key('confirmPassword')}
+            {...addUserForm.getInputProps('confirmPassword')}
+            style={{ flex: 1 }}
+          />
+          <Group justify="flex-end" mt="sm">
+            <Button mt="sm" loading={addUserLoading} type="submit">
+              {t('confirm', { defaultValue: 'Confirm' })}
+            </Button>
+          </Group>
+        </form>
+      </Modal>
+
+      {/* Admin Reset Password Modal */}
+      <Modal
+        opened={adminResetPasswordOpened}
+        onClose={closeAdminResetPassword}
+        title={`${t('reset_password')} - ${targetUser?.username}`}
+      >
+        <form onSubmit={adminResetPasswordForm.onSubmit((values) => adminResetPassword(values))}>
+          <PasswordInput
+            name="newPassword"
+            label={t('new_password')}
+            withAsterisk
+            placeholder={t('enter_new_password')}
+            {...adminResetPasswordForm.getInputProps('newPassword')}
+          />
+          <PasswordInput
+            mt="sm"
+            name="confirmPassword"
+            label={t('confirm_password')}
+            withAsterisk
+            placeholder={t('confirm_password')}
+            {...adminResetPasswordForm.getInputProps('confirmPassword')}
+          />
+          <Group justify="flex-end" mt="md">
+            <Button type="submit" loading={adminResetPasswordLoading}>
+              {t('confirm')}
+            </Button>
+          </Group>
+        </form>
+      </Modal>
+
+      {/* Confirm Delete User Modal */}
+      <Modal
+        opened={confirmDeleteUserOpened}
+        onClose={closeConfirmDeleteUser}
+        title={t('confirm_delete', { defaultValue: 'Confirm Delete' })}
+      >
+        <Stack>
+          <Text>
+            {t('delete_user_confirmation', {
+              defaultValue: `Are you sure you want to delete user "${targetUser?.username}"? This action cannot be undone.`,
+              username: targetUser?.username,
+            })}
+          </Text>
+          <Group justify="flex-end" mt="md">
+            <Button variant="default" onClick={closeConfirmDeleteUser}>
+              {t('cancel')}
+            </Button>
+            <Button color="red" onClick={deleteUser} loading={deleteUserLoading}>
+              {t('delete')}
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      {/* Reset Password Modal */}
+      <Modal opened={resetPasswordOpened} onClose={closeResetPassword} title={t('reset_password')}>
+        <form onSubmit={resetPasswordForm.onSubmit((values) => resetPassword(values))}>
+          <PasswordInput
+            name="oldPassword"
+            label={t('old_password')}
+            withAsterisk
+            leftSection={<IconLock size={16} />}
+            placeholder={t('enter_old_password')}
+            key={resetPasswordForm.key('oldPassword')}
+            {...resetPasswordForm.getInputProps('oldPassword')}
+            style={{ flex: 1 }}
+          />
+          <PasswordInput
+            mt="sm"
+            name="newPassword"
+            label={t('new_password')}
+            withAsterisk
+            leftSection={<IconLock size={16} />}
+            placeholder={t('enter_new_password')}
+            key={resetPasswordForm.key('newPassword')}
+            {...resetPasswordForm.getInputProps('newPassword')}
+            style={{ flex: 1 }}
+          />
+          <Group justify="flex-end" mt="sm">
+            <Button mt="sm" loading={resetPasswordLoading} type="submit">
+              {t('confirm_reset')}
+            </Button>
+          </Group>
+        </form>
+      </Modal>
+
+      {/* Confirm Generate API Key Modal */}
+      <Modal
+        opened={confirmGenerateApiKeyOpened}
+        onClose={closeConfirmGenerateApiKey}
+        title={t('confirm_generation')}
+      >
+        <Text fw={500}>{t('confirm_generate_api_key_tip')}</Text>
+        <Group justify="flex-end" mt="md">
+          <Button
+            color="red"
+            onClick={() => {
+              generateApiKey().then(closeConfirmGenerateApiKey);
+            }}
+          >
+            {t('confirm')}
+          </Button>
+        </Group>
+      </Modal>
+
+      <Modal
+        opened={editYtDlpArgsOpened}
+        onClose={closeEditYtDlpArgs}
+        size="lg"
+        title={t('yt_dlp_args', { defaultValue: 'yt-dlp args' })}
+      >
+        <Stack>
+          <Alert>
+            <Text c="red" size="sm" fw={500}>
+              {t('yt_dlp_args_warning', {
+                defaultValue:
+                  '⚠️ Custom yt-dlp arguments are advanced and may cause downloads to fail. If issues occur, remove the arguments and retry.',
+              })}
+            </Text>
+          </Alert>
+          <Textarea
+            label={t('yt_dlp_args_input', { defaultValue: 'Custom arguments' })}
+            placeholder="--force-ipv6"
+            resize="vertical"
+            minRows={3}
+            value={ytDlpArgsText}
+            onChange={(event) => setYtDlpArgsText(event.currentTarget.value)}
+          />
+          <Text size="sm" c="dimmed">
+            {t('yt_dlp_args_hint', {
+              defaultValue: 'One argument per line. Example: --force-ipv6.',
+            })}
+          </Text>
+          <Text size="sm">{t('yt_dlp_args_blocked', { defaultValue: 'Blocked arguments:' })}</Text>
+          <List size="sm" withPadding>
+            {blockedYtDlpArgs.map((arg) => (
+              <List.Item key={arg}>
+                <code>{arg}</code>
+              </List.Item>
+            ))}
+          </List>
+          <Group justify="flex-end">
+            <Button variant="default" onClick={closeEditYtDlpArgs}>
+              {t('cancel')}
+            </Button>
+            <Button onClick={saveYtDlpArgs}>{t('save')}</Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={editYtDlpRuntimeOpened}
+        onClose={closeEditYtDlpRuntime}
+        title={t('yt_dlp_runtime_label', { defaultValue: 'yt-dlp version' })}
+      >
+        <Stack>
+          <Group justify="space-between">
+            <Text size="sm" c="dimmed">
+              {t('yt_dlp_current_runtime', { defaultValue: 'Current runtime' })}
+            </Text>
+            <Text size="sm" fw={500}>
+              {getActiveYtDlpRuntimeLabel()}
+            </Text>
+          </Group>
+
+          <Group justify="space-between">
+            <Text size="sm" c="dimmed">
+              {t('yt_dlp_runtime_mode_label', { defaultValue: 'Runtime mode' })}
+            </Text>
+            <Text size="sm" fw={500}>
+              {getYtDlpRuntimeModeText(ytDlpRuntime?.mode)}
+            </Text>
+          </Group>
+
+          <Group justify="space-between">
+            <Text size="sm" c="dimmed">
+              {t('yt_dlp_current_version', { defaultValue: 'Current version' })}
+            </Text>
+            <Text size="sm" fw={500}>
+              {ytDlpRuntime?.version ||
+                t('yt_dlp_version_unknown', {
+                  defaultValue: 'Unknown',
+                })}
+            </Text>
+          </Group>
+
+          <Group justify="space-between">
+            <Text size="sm" c="dimmed">
+              {t('yt_dlp_update_status_label', { defaultValue: 'Update status' })}
+            </Text>
+            <Text size="sm" fw={500}>
+              {getYtDlpStatusText(ytDlpRuntime?.status?.state)}
+            </Text>
+          </Group>
+
+          <Group align="flex-end" wrap="nowrap" gap="xs">
+            <Select
+              style={{ flex: 1 }}
+              label={t('yt_dlp_runtime_select_label', { defaultValue: 'Available runtimes' })}
+              data={getYtDlpRuntimeOptions()}
+              value={ytDlpRuntimeKey}
+              onChange={(value) => {
+                if (value) {
+                  setYtDlpRuntimeKey(value);
+                }
+              }}
+              disabled={ytDlpUpdating || ytDlpSwitchSubmitting}
+              nothingFoundMessage={t('yt_dlp_runtime_empty', {
+                defaultValue: 'No runtime available.',
+              })}
+            />
+            <Button
+              variant="default"
+              onClick={() => {
+                switchYtDlpRuntime().then();
+              }}
+              loading={ytDlpSwitchSubmitting}
+              disabled={
+                ytDlpUpdating ||
+                !ytDlpRuntimeKey ||
+                ytDlpRuntimeKey === ytDlpRuntime?.activeRuntimeKey
+              }
+            >
+              {t('yt_dlp_runtime_switch_action', { defaultValue: 'Switch runtime' })}
+            </Button>
+          </Group>
+
+          <Select
+            label={t('yt_dlp_update_channel', { defaultValue: 'Update channel' })}
+            data={[
+              {
+                label: t('yt_dlp_channel_stable', { defaultValue: 'Stable' }),
+                value: 'stable',
+              },
+              {
+                label: t('yt_dlp_channel_nightly', { defaultValue: 'Nightly' }),
+                value: 'nightly',
+              },
+            ]}
+            value={ytDlpChannel}
+            onChange={(value) => {
+              if (value) {
+                setYtDlpChannel(value);
+              }
+            }}
+            disabled={ytDlpUpdating}
+          />
+
+          <Alert color="blue">
+            <Text size="sm">
+              {t('yt_dlp_runtime_persistence_hint', {
+                defaultValue:
+                  'Installed managed yt-dlp runtimes are stored under /data, survive container recreation, and remain available after switching away from them.',
+              })}
+            </Text>
+          </Alert>
+
+          {ytDlpRuntime?.status?.state === 'FAILED' && ytDlpRuntime?.status?.error ? (
+            <Alert color="red">
+              <Text size="sm">{ytDlpRuntime.status.error}</Text>
+            </Alert>
+          ) : null}
+
+          <Group justify="space-between">
+            <Button
+              variant="default"
+              onClick={() => {
+                fetchYtDlpRuntime().catch(() => {});
+              }}
+            >
+              {t('refresh')}
+            </Button>
+            <Button
+              onClick={openConfirmUpdateYtDlp}
+              loading={ytDlpUpdateSubmitting}
+              disabled={ytDlpUpdating}
+            >
+              {t('yt_dlp_update_now', { defaultValue: 'Update now' })}
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={exportOpmlOpened}
+        onClose={closeExportOpml}
+        size="lg"
+        title={t('export_subscriptions_modal_title')}
+      >
+        <Stack>
+          <Text size="sm" c="dimmed">
+            {t('export_subscriptions_modal_desc')}
+          </Text>
+          <Group justify="space-between">
+            <Text size="sm" c="dimmed">
+              {t('export_subscriptions_selected_count', {
+                selected: selectedVisibleExportFeedCount,
+                total: filteredExportFeedList.length,
+              })}
+            </Text>
+            <Group gap="xs">
+              <Button
+                size="xs"
+                variant="default"
+                onClick={selectAllExportFeeds}
+                disabled={exportFeedsLoading || filteredExportFeedList.length === 0}
+              >
+                {t('export_subscriptions_select_all')}
+              </Button>
+              <Button
+                size="xs"
+                variant="default"
+                onClick={clearExportFeedSelection}
+                disabled={exportFeedsLoading || selectedExportFeedKeys.length === 0}
+              >
+                {t('export_subscriptions_clear')}
+              </Button>
+            </Group>
+          </Group>
+          <Stack gap={4}>
+            <Text size="sm" c="dimmed">
+              {t('export_subscriptions_filter_label')}
+            </Text>
+            <SegmentedControl
+              fullWidth
+              value={exportFeedTypeFilter}
+              onChange={setExportFeedTypeFilter}
+              disabled={exportFeedsLoading}
+              data={[
+                {
+                  label: t('export_subscriptions_filter_all'),
+                  value: 'all',
+                },
+                {
+                  label: t('feed_type_channel'),
+                  value: 'channel',
+                },
+                {
+                  label: t('feed_type_playlist'),
+                  value: 'playlist',
+                },
+              ]}
+            />
+          </Stack>
+          <ScrollArea h={300}>
+            <Checkbox.Group value={selectedExportFeedKeys} onChange={setSelectedExportFeedKeys}>
+              <Stack gap="xs">
+                {exportFeedsLoading ? (
+                  <Text size="sm" c="dimmed">
+                    {t('loading')}...
+                  </Text>
+                ) : null}
+                {!exportFeedsLoading && filteredExportFeedList.length === 0 ? (
+                  <Text size="sm" c="dimmed">
+                    {exportFeedList.length === 0
+                      ? t('export_subscriptions_no_feeds')
+                      : t('export_subscriptions_no_filtered_feeds')}
+                  </Text>
+                ) : null}
+                {!exportFeedsLoading
+                  ? filteredExportFeedList.map((feed) => {
+                      const feedTypeKey = `feed_type_${String(feed?.type || '').toLowerCase()}`;
+                      const feedTypeLabel = t(feedTypeKey, { defaultValue: feed?.type || '' });
+                      const feedLabel = feed?.customTitle || feed?.title || feed?.id;
+                      return (
+                        <Checkbox
+                          key={getExportFeedKey(feed)}
+                          value={getExportFeedKey(feed)}
+                          label={`${feedLabel} (${feedTypeLabel})`}
+                        />
+                      );
+                    })
+                  : null}
+              </Stack>
+            </Checkbox.Group>
+          </ScrollArea>
+          <Group justify="flex-end">
+            <Button variant="default" onClick={closeExportOpml}>
+              {t('cancel')}
+            </Button>
+            <Button
+              leftSection={<IconDownload size={16} />}
+              loading={exportingOpml}
+              disabled={exportFeedsLoading || selectedExportFeedKeys.length === 0}
+              onClick={() => {
+                exportSelectedFeedsAsOpml().then();
+              }}
+            >
+              {t('export_subscriptions_download')}
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={confirmUpdateYtDlpOpened}
+        onClose={closeConfirmUpdateYtDlp}
+        title={t('yt_dlp_update_confirm_title', { defaultValue: 'Confirm yt-dlp update' })}
+      >
+        <Text fw={500}>
+          {t('yt_dlp_update_confirm_tip', {
+            defaultValue: 'Start updating yt-dlp with channel:',
+          })}{' '}
+          <code>{ytDlpChannel}</code>
+        </Text>
+        <Group justify="flex-end" mt="md">
+          <Button variant="default" onClick={closeConfirmUpdateYtDlp}>
+            {t('cancel')}
+          </Button>
+          <Button
+            onClick={() => {
+              updateYtDlpVersion().then();
+            }}
+            loading={ytDlpUpdateSubmitting}
+          >
+            {t('confirm')}
+          </Button>
+        </Group>
+      </Modal>
+
+      {/* Change Username Modal */}
+      <Modal
+        opened={changeUsernameOpened}
+        onClose={closeChangeUsername}
+        title={t('change_username')}
+      >
+        <form onSubmit={changeUsernameForm.onSubmit((values) => changeUsername(values))}>
+          <TextInput
+            withAsterisk
+            label={t('new_username')}
+            placeholder={t('enter_new_username')}
+            key={changeUsernameForm.key('username')}
+            maxLength={20}
+            {...changeUsernameForm.getInputProps('username')}
+          />
+          <Group justify="flex-end" mt="md">
+            <Button type="submit">{t('confirm')}</Button>
+          </Group>
+        </form>
+      </Modal>
+
+      {/* YouTube Data API Key Edit Modal */}
+      <Modal
+        opened={editYoutubeApiKeyOpened}
+        onClose={closeEditYoutubeApiKey}
+        title={t('youtube_data_api_key')}
+      >
+        <Stack>
+          <PasswordInput
+            label={t('youtube_data_api_key')}
+            placeholder={t('enter_youtube_data_api_key')}
+            value={youtubeApiKey}
+            onChange={(event) => setYoutubeApiKey(event.currentTarget.value)}
+            leftSection={<IconLock size={16} />}
+          />
+          <NumberInput
+            label={t('youtube_daily_limit_units_label', {
+              defaultValue: 'YouTube daily quota limit',
+            })}
+            description={t('youtube_daily_limit_units_desc', {
+              defaultValue: 'Leave empty for unlimited.',
+            })}
+            placeholder={t('youtube_daily_limit_units_placeholder', { defaultValue: '10000' })}
+            value={youtubeDailyLimitUnits}
+            min={1}
+            onChange={setYoutubeDailyLimitUnits}
+            clampBehavior="strict"
+          />
+          <Text size="sm" c="dimmed">
+            {t('youtube_quota_auto_sync_tip', {
+              defaultValue:
+                'When the daily quota limit is reached, auto sync will stop for today and resume tomorrow.',
+            })}
+          </Text>
+          {youtubeQuotaToday ? (
+            <Alert
+              color={
+                youtubeQuotaToday.autoSyncBlocked
+                  ? 'red'
+                  : youtubeQuotaToday.warningReached
+                    ? 'orange'
+                    : 'blue'
+              }
+              variant="light"
+              radius="md"
+            >
+              <Stack gap={4}>
+                <Text size="sm">
+                  {t('youtube_quota_today_usage', {
+                    defaultValue: 'Today usage: {{used}} units / {{limit}}',
+                    used: youtubeQuotaToday.usedUnits ?? 0,
+                    limit: youtubeQuotaToday.dailyLimitUnits
+                      ? youtubeQuotaToday.dailyLimitUnits
+                      : t('youtube_daily_limit_unlimited', { defaultValue: 'Unlimited' }),
+                  })}
+                </Text>
+                {youtubeQuotaToday.autoSyncBlocked ? (
+                  <Text size="sm">
+                    {t('youtube_quota_auto_sync_blocked', {
+                      defaultValue:
+                        'Auto sync is stopped for today because quota limit has been reached. It will resume tomorrow.',
+                    })}
+                  </Text>
+                ) : null}
+              </Stack>
+            </Alert>
+          ) : null}
+        </Stack>
+        <Group justify="flex-end" mt="md">
+          <Button
+            onClick={() => {
+              saveYoutubeApiKey().then();
+            }}
+          >
+            {t('confirm')}
+          </Button>
+        </Group>
+      </Modal>
+
+      <Modal
+        opened={editBaseUrlOpened}
+        onClose={closeEditBaseUrl}
+        title={t('base_url_label', { defaultValue: 'Base URL' })}
+      >
+        <Stack>
+          <TextInput
+            label={t('base_url_label', { defaultValue: 'Base URL' })}
+            placeholder="https://your-domain.com"
+            value={systemConfig.baseUrl || ''}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setSystemConfig((prev) => ({
+                ...prev,
+                baseUrl: value,
+              }));
+            }}
+            description={t('base_url_hint', {
+              defaultValue:
+                'Can be empty for startup, but RSS link generation/copy requires this field.',
+            })}
+          />
+          <Group justify="flex-end">
+            <Button variant="default" onClick={closeEditBaseUrl}>
+              {t('cancel')}
+            </Button>
+            <Button
+              loading={systemConfigSaving}
+              onClick={async () => {
+                const success = await saveSystemConfig(
+                  t('base_url_saved', {
+                    defaultValue: 'Base URL saved.',
+                  }),
+                );
+                if (success) {
+                  closeEditBaseUrl();
+                }
+              }}
+            >
+              {t('confirm')}
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={editProxyConfigOpened}
+        onClose={() => {
+          setProxyTestResult(null);
+          closeEditProxyConfig();
+        }}
+        title={t('network_proxy_label', { defaultValue: 'Network proxy' })}
+      >
+        <Stack>
+          <Switch
+            checked={Boolean(systemConfig.proxyEnabled)}
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
+              setSystemConfig((prev) => ({
+                ...prev,
+                proxyEnabled: checked,
+                proxyType: prev.proxyType || 'HTTP',
+              }));
+            }}
+            label={t('proxy_enable_label', { defaultValue: 'Enable proxy' })}
+          />
+
+          <Text size="sm" c="dimmed" fs="italic">
+            {t('proxy_enable_hint', {
+              defaultValue:
+                  'Used for YouTube Data API and yt-dlp requests. Saving only affects new requests.',
+            })}
+          </Text>
+
+          <Select
+            label={t('proxy_type_label', { defaultValue: 'Proxy type' })}
+            data={[
+              { label: 'HTTP/HTTPS', value: 'HTTP' },
+              { label: 'SOCKS5', value: 'SOCKS5' },
+            ]}
+            value={systemConfig.proxyType || 'HTTP'}
+            disabled={!systemConfig.proxyEnabled}
+            onChange={(value) => {
+              setSystemConfig((prev) => ({
+                ...prev,
+                proxyType: value || 'HTTP',
+              }));
+            }}
+          />
+
+          <TextInput
+            label={t('proxy_host_label', { defaultValue: 'Host' })}
+            placeholder="192.168.6.2"
+            disabled={!systemConfig.proxyEnabled}
+            value={systemConfig.proxyHost || ''}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setSystemConfig((prev) => ({
+                ...prev,
+                proxyHost: value,
+              }));
+            }}
+            description={t('proxy_host_hint', {
+              defaultValue:
+                'If PigeonPod runs in Docker and the proxy runs on the host machine, do not use 127.0.0.1. Use host.docker.internal or the host LAN IP instead.',
+            })}
+          />
+
+          <NumberInput
+            label={t('proxy_port_label', { defaultValue: 'Port' })}
+            placeholder="7890"
+            min={1}
+            max={65535}
+            disabled={!systemConfig.proxyEnabled}
+            value={systemConfig.proxyPort}
+            onChange={(value) =>
+              setSystemConfig((prev) => ({
+                ...prev,
+                proxyPort: value,
+              }))
+            }
+          />
+
+          <TextInput
+            label={t('proxy_username_label', { defaultValue: 'Username' })}
+            disabled={!systemConfig.proxyEnabled}
+            value={systemConfig.proxyUsername || ''}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setSystemConfig((prev) => ({
+                ...prev,
+                proxyUsername: value,
+              }));
+            }}
+          />
+
+          <PasswordInput
+            label={t('proxy_password_label', { defaultValue: 'Password' })}
+            placeholder={
+              systemConfig.hasProxyPassword
+                ? t('proxy_password_keep_hint', {
+                    defaultValue: 'Leave empty to keep current password',
+                  })
+                : ''
+            }
+            disabled={!systemConfig.proxyEnabled}
+            value={systemConfig.proxyPassword || ''}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setSystemConfig((prev) => ({
+                ...prev,
+                proxyPassword: value,
+                hasProxyPassword: prev.hasProxyPassword || Boolean(value),
+              }));
+            }}
+          />
+
+          {proxyTestResult ? (
+            <Alert variant="default">
+              <Stack gap={4}>
+                <Text size="sm">
+                  YouTube Data API:{' '}
+                  <Text
+                    span
+                    fw={600}
+                    c={getProxyTestStatusColor(Boolean(proxyTestResult.youtubeApi?.success))}
+                  >
+                    {proxyTestResult.youtubeApi?.success
+                      ? t('success', { defaultValue: 'Success' })
+                      : t('failed', { defaultValue: 'Failed' })}
+                  </Text>
+                </Text>
+                <Text size="xs" fs="italic">
+                  {proxyTestResult.youtubeApi?.message || '-'}
+                </Text>
+                <Text size="sm" mt="xs">
+                  yt-dlp:{' '}
+                  <Text fw={600} span c={getProxyTestStatusColor(Boolean(proxyTestResult.ytDlp?.success))}>
+                    {proxyTestResult.ytDlp?.success
+                      ? t('success', { defaultValue: 'Success' })
+                      : t('failed', { defaultValue: 'Failed' })}
+                  </Text>
+                </Text>
+                <Text size="xs" fs="italic">
+                  {proxyTestResult.ytDlp?.message || '-'}
+                </Text>
+              </Stack>
+            </Alert>
+          ) : null}
+
+          <Group justify="space-between">
+            <Button
+              variant="light"
+              onClick={testProxyConfig}
+              loading={proxyTesting}
+              disabled={!systemConfig.proxyEnabled}
+            >
+              {t('proxy_test_action', { defaultValue: 'Run proxy tests' })}
+            </Button>
+            <Group>
+              <Button
+                variant="default"
+                onClick={() => {
+                  setProxyTestResult(null);
+                  closeEditProxyConfig();
+                }}
+              >
+                {t('cancel')}
+              </Button>
+              <Button
+                loading={systemConfigSaving}
+                onClick={async () => {
+                  const success = await saveSystemConfig(
+                    t('proxy_config_saved', {
+                      defaultValue: 'Network proxy saved. New requests will use the updated proxy.',
+                    }),
+                  );
+                  if (success) {
+                    setProxyTestResult(null);
+                    closeEditProxyConfig();
+                  }
+                }}
+              >
+                {t('confirm')}
+              </Button>
+            </Group>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={editNotificationConfigOpened}
+        onClose={closeEditNotificationConfig}
+        title={t('notification_label')}
+        size="lg"
+      >
+        <Stack>
+          <Alert variant="light">
+            {t('notification_digest_hint')}
+          </Alert>
+
+          <SegmentedControl
+            fullWidth
+            value={notificationChannel}
+            onChange={setNotificationChannel}
+            data={[
+              {
+                label: t('notification_email_section'),
+                value: 'email',
+              },
+              {
+                label: t('notification_webhook_section'),
+                value: 'webhook',
+              },
+            ]}
+          />
+
+          {notificationChannel === 'email' ? (
+            <Stack gap="sm">
+              <Switch
+                checked={Boolean(notificationConfig.emailEnabled)}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked;
+                  setNotificationConfig((prev) => ({
+                    ...prev,
+                    emailEnabled: checked,
+                  }));
+                }}
+                label={t('notification_email_enable')}
+              />
+              <Text size="sm" c="dimmed">
+                {t('notification_email_setup_hint')}
+              </Text>
+              <Group grow align="flex-start">
+                <TextInput
+                  label={t('notification_email_host')}
+                  placeholder="smtp.example.com"
+                  disabled={!notificationConfig.emailEnabled}
+                  value={notificationConfig.emailHost || ''}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setNotificationConfig((prev) => ({
+                      ...prev,
+                      emailHost: value,
+                    }));
+                  }}
+                />
+                <NumberInput
+                  label={t('notification_email_port')}
+                  placeholder="587"
+                  min={1}
+                  max={65535}
+                  disabled={!notificationConfig.emailEnabled}
+                  value={notificationConfig.emailPort}
+                  onChange={(value) =>
+                    setNotificationConfig((prev) => ({
+                      ...prev,
+                      emailPort: value,
+                    }))
+                  }
+                />
+              </Group>
+              <Group grow align="flex-start">
+                <TextInput
+                  label={t('notification_email_username')}
+                  disabled={!notificationConfig.emailEnabled}
+                  value={notificationConfig.emailUsername || ''}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setNotificationConfig((prev) => ({
+                      ...prev,
+                      emailUsername: value,
+                    }));
+                  }}
+                />
+                <PasswordInput
+                  label={t('notification_email_password')}
+                  placeholder={
+                    notificationConfig.hasEmailPassword
+                      ? t('notification_email_password_keep_hint')
+                      : ''
+                  }
+                  disabled={!notificationConfig.emailEnabled}
+                  value={notificationConfig.emailPassword || ''}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setNotificationConfig((prev) => ({
+                      ...prev,
+                      emailPassword: value,
+                      hasEmailPassword: prev.hasEmailPassword || Boolean(value),
+                    }));
+                  }}
+                />
+              </Group>
+              <Group grow align="flex-start">
+                <TextInput
+                  label={t('notification_email_from')}
+                  placeholder="noreply@example.com"
+                  disabled={!notificationConfig.emailEnabled}
+                  value={notificationConfig.emailFrom || ''}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setNotificationConfig((prev) => ({
+                      ...prev,
+                      emailFrom: value,
+                    }));
+                  }}
+                />
+                <TextInput
+                  label={t('notification_email_to')}
+                  placeholder="you@example.com"
+                  disabled={!notificationConfig.emailEnabled}
+                  value={notificationConfig.emailTo || ''}
+                  onChange={(event) => {
+                    const value = event.currentTarget.value;
+                    setNotificationConfig((prev) => ({
+                      ...prev,
+                      emailTo: value,
+                    }));
+                  }}
+                />
+              </Group>
+              <Group grow>
+                <Checkbox
+                  checked={Boolean(notificationConfig.emailStarttlsEnabled)}
+                  disabled={!notificationConfig.emailEnabled}
+                  label={t('notification_email_starttls')}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    setNotificationConfig((prev) => ({
+                      ...prev,
+                      emailStarttlsEnabled: checked,
+                    }));
+                  }}
+                />
+                <Checkbox
+                  checked={Boolean(notificationConfig.emailSslEnabled)}
+                  disabled={!notificationConfig.emailEnabled}
+                  label={t('notification_email_ssl')}
+                  onChange={(event) => {
+                    const checked = event.currentTarget.checked;
+                    setNotificationConfig((prev) => ({
+                      ...prev,
+                      emailSslEnabled: checked,
+                    }));
+                  }}
+                />
+              </Group>
+            </Stack>
+          ) : (
+            <Stack gap="sm">
+              <Switch
+                checked={Boolean(notificationConfig.webhookEnabled)}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked;
+                  setNotificationConfig((prev) => ({
+                    ...prev,
+                    webhookEnabled: checked,
+                  }));
+                }}
+                label={t('notification_webhook_enable')}
+              />
+              <TextInput
+                label={t('notification_webhook_url')}
+                placeholder="https://example.com/webhook"
+                disabled={!notificationConfig.webhookEnabled}
+                value={notificationConfig.webhookUrl || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setNotificationConfig((prev) => ({
+                    ...prev,
+                    webhookUrl: value,
+                  }));
+                }}
+              />
+              <Textarea
+                label={t('notification_webhook_headers')}
+                description={t('notification_webhook_headers_description')}
+                placeholder={'Authorization: Bearer xxx'}
+                minRows={1}
+                autosize
+                resize="vertical"
+                disabled={!notificationConfig.webhookEnabled}
+                value={notificationConfig.webhookCustomHeaders || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setNotificationConfig((prev) => ({
+                    ...prev,
+                    webhookCustomHeaders: value,
+                  }));
+                }}
+              />
+              <Textarea
+                label={t('notification_webhook_json_body')}
+                description={t('notification_webhook_json_body_description')}
+                placeholder={`{\n  "title": "{title}",\n  "body": "{content}"\n}`}
+                minRows={4}
+                autosize
+                resize="vertical"
+                disabled={!notificationConfig.webhookEnabled}
+                value={notificationConfig.webhookJsonBody || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setNotificationConfig((prev) => ({
+                    ...prev,
+                    webhookJsonBody: value,
+                  }));
+                }}
+              />
+            </Stack>
+          )}
+
+          <Group justify="space-between">
+            {notificationChannel === 'email' ? (
+              <Button
+                variant="light"
+                onClick={testNotificationEmail}
+                loading={notificationEmailTesting}
+                disabled={!notificationConfig.emailEnabled}
+              >
+                {t('notification_email_test_action')}
+              </Button>
+            ) : (
+              <Button
+                variant="light"
+                onClick={testNotificationWebhook}
+                loading={notificationWebhookTesting}
+                disabled={!notificationConfig.webhookEnabled}
+              >
+                {t('notification_webhook_test_action')}
+              </Button>
+            )}
+            <Group justify="flex-end">
+              <Button variant="default" onClick={closeEditNotificationConfig}>
+                {t('cancel')}
+              </Button>
+              <Button
+                loading={notificationConfigSaving}
+                onClick={async () => {
+                  const success = await saveNotificationConfig(
+                    t('notification_config_saved'),
+                  );
+                  if (success) {
+                    closeEditNotificationConfig();
+                  }
+                }}
+              >
+                {t('confirm')}
+              </Button>
+            </Group>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={editStorageConfigOpened}
+        onClose={handleCloseEditStorageConfig}
+        title={t('storage_strategy_label', { defaultValue: 'Storage strategy' })}
+        size="lg"
+      >
+        <Stack gap="sm">
+          <SegmentedControl
+            value={systemConfig.storageType || 'LOCAL'}
+            onChange={changeStorageType}
+            disabled={storageSwitchChecking}
+            data={[
+              { label: 'LOCAL', value: 'LOCAL' },
+              { label: 'S3', value: 'S3' },
+            ]}
+          />
+          <Text size="sm" c="dimmed">
+            {t('storage_switch_manual_migration_hint', {
+              defaultValue:
+                'Switching storage mode does not migrate existing media. Please migrate files manually.',
+            })}
+          </Text>
+
+          {systemConfig.storageType === 'S3' ? (
+            <Stack gap="xs">
+              <TextInput
+                label={t('storage_temp_dir', { defaultValue: 'Temp directory' })}
+                description={t('storage_temp_dir_local_only_hint', {
+                  defaultValue: '缓存目录只允许使用本地磁盘目录',
+                })}
+                value={systemConfig.storageTempDir || ''}
+                error={
+                  systemConfig.storageTempDir && !isLocalDiskPath(systemConfig.storageTempDir)
+                    ? t('storage_temp_dir_local_disk_only', {
+                        defaultValue:
+                          'Temp directory must be a local disk path, such as /tmp/pigeon-pod.',
+                      })
+                    : null
+                }
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    storageTempDir: value,
+                  }));
+                }}
+              />
+              <TextInput
+                label={t('s3_endpoint', { defaultValue: 'S3 Endpoint' })}
+                placeholder="https://xxx.r2.cloudflarestorage.com"
+                value={systemConfig.s3Endpoint || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    s3Endpoint: value,
+                  }));
+                }}
+              />
+              <TextInput
+                label={t('s3_region', { defaultValue: 'S3 Region' })}
+                description={t('s3_region_desc', {
+                  defaultValue:
+                    'Cloudflare R2 usually uses auto; MinIO typically uses us-east-1 unless your MinIO server defines a custom region.',
+                })}
+                value={systemConfig.s3Region || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    s3Region: value,
+                  }));
+                }}
+              />
+              <TextInput
+                label={t('s3_bucket', { defaultValue: 'S3 Bucket' })}
+                value={systemConfig.s3Bucket || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    s3Bucket: value,
+                  }));
+                }}
+              />
+              <TextInput
+                label={t('s3_access_key', { defaultValue: 'S3 Access Key' })}
+                value={systemConfig.s3AccessKey || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    s3AccessKey: value,
+                  }));
+                }}
+              />
+              <PasswordInput
+                label={t('s3_secret_key', { defaultValue: 'S3 Secret Key' })}
+                placeholder={
+                  systemConfig.hasS3SecretKey
+                    ? t('s3_secret_keep_hint', {
+                        defaultValue: 'Leave empty to keep current secret key',
+                      })
+                    : ''
+                }
+                value={systemConfig.s3SecretKey || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    s3SecretKey: value,
+                    hasS3SecretKey: prev.hasS3SecretKey || Boolean(value),
+                  }));
+                }}
+              />
+              <Switch
+                checked={Boolean(systemConfig.s3PathStyleAccess)}
+                onChange={(event) => {
+                  const checked = event.currentTarget.checked;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    s3PathStyleAccess: checked,
+                  }));
+                }}
+                label={t('s3_path_style_access', { defaultValue: 'Path style access' })}
+                description={t('s3_path_style_access_desc', {
+                  defaultValue:
+                    'Use path-style URL access. Usually true for MinIO. Cloudflare R2 is usually false when using account endpoint.',
+                })}
+              />
+              <Button
+                color="dimmed"
+                variant="default"
+                fullWidth
+                rightSection={
+                  storageAdvancedOpened ? (
+                    <IconChevronUp size={16} />
+                  ) : (
+                    <IconChevronDown size={16} />
+                  )
+                }
+                onClick={() => setStorageAdvancedOpened((prev) => !prev)}
+              >
+                {t('storage_advanced_config', { defaultValue: 'Advanced config' })}
+              </Button>
+              <Collapse in={storageAdvancedOpened}>
+                <Stack gap="xs" mt="xs">
+                  <NumberInput
+                    label={t('s3_connect_timeout_seconds', { defaultValue: 'Connect timeout (s)' })}
+                    description={t('s3_connect_timeout_seconds_desc', {
+                      defaultValue:
+                        'Maximum time to establish TCP connection with the storage endpoint.',
+                    })}
+                    min={1}
+                    value={systemConfig.s3ConnectTimeoutSeconds}
+                    onChange={(value) =>
+                      setSystemConfig((prev) => ({
+                        ...prev,
+                        s3ConnectTimeoutSeconds: value,
+                      }))
+                    }
+                  />
+                  <NumberInput
+                    label={t('s3_socket_timeout_seconds', { defaultValue: 'Socket timeout (s)' })}
+                    description={t('s3_socket_timeout_seconds_desc', {
+                      defaultValue:
+                        'Maximum idle time for a socket operation before retry/timeout.',
+                    })}
+                    min={1}
+                    value={systemConfig.s3SocketTimeoutSeconds}
+                    onChange={(value) =>
+                      setSystemConfig((prev) => ({
+                        ...prev,
+                        s3SocketTimeoutSeconds: value,
+                      }))
+                    }
+                  />
+                  <NumberInput
+                    label={t('s3_read_timeout_seconds', { defaultValue: 'Read timeout (s)' })}
+                    description={t('s3_read_timeout_seconds_desc', {
+                      defaultValue:
+                        'Maximum time waiting for response body data from storage service.',
+                    })}
+                    min={1}
+                    value={systemConfig.s3ReadTimeoutSeconds}
+                    onChange={(value) =>
+                      setSystemConfig((prev) => ({
+                        ...prev,
+                        s3ReadTimeoutSeconds: value,
+                      }))
+                    }
+                  />
+                  <NumberInput
+                    label={t('s3_presign_expire_hours', { defaultValue: 'Presign expire (hours)' })}
+                    description={t('s3_presign_expire_hours_desc', {
+                      defaultValue:
+                        'How long generated presigned URLs stay valid for play/download links.',
+                    })}
+                    min={1}
+                    value={systemConfig.s3PresignExpireHours}
+                    onChange={(value) =>
+                      setSystemConfig((prev) => ({
+                        ...prev,
+                        s3PresignExpireHours: value,
+                      }))
+                    }
+                  />
+                </Stack>
+              </Collapse>
+            </Stack>
+          ) : (
+            <Stack gap="xs">
+              <TextInput
+                label={t('local_audio_path', { defaultValue: 'Local audio path' })}
+                description={t('local_path_docker_hint', {
+                  defaultValue:
+                    'If you run PigeonPod with Docker, enter the persistent volume or bind mount directory configured for the container here.',
+                })}
+                value={systemConfig.localAudioPath || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    localAudioPath: value,
+                  }));
+                }}
+              />
+              <TextInput
+                label={t('local_video_path', { defaultValue: 'Local video path' })}
+                description={t('local_path_docker_hint', {
+                  defaultValue:
+                    'If you run PigeonPod with Docker, enter the persistent volume or bind mount directory configured for the container here.',
+                })}
+                value={systemConfig.localVideoPath || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    localVideoPath: value,
+                  }));
+                }}
+              />
+              <TextInput
+                label={t('local_cover_path', { defaultValue: 'Local cover path' })}
+                description={t('local_path_docker_hint', {
+                  defaultValue:
+                    'If you run PigeonPod with Docker, enter the persistent volume or bind mount directory configured for the container here.',
+                })}
+                value={systemConfig.localCoverPath || ''}
+                onChange={(event) => {
+                  const value = event.currentTarget.value;
+                  setSystemConfig((prev) => ({
+                    ...prev,
+                    localCoverPath: value,
+                  }));
+                }}
+              />
+            </Stack>
+          )}
+
+          <TextInput
+            label={t('download_file_name_pattern_label', {
+              defaultValue: 'Download file name pattern',
+            })}
+            placeholder="{title}-{id}"
+            value={systemConfig.downloadFileNamePattern || ''}
+            onChange={(event) => {
+              const value = event.currentTarget.value;
+              setSystemConfig((prev) => ({
+                ...prev,
+                downloadFileNamePattern: value,
+              }));
+            }}
+            description={t('download_file_name_pattern_desc', {
+              defaultValue:
+                'Supported variables: {channel}, {title}, {id}, {date}. If a rendered file name already exists, PigeonPod will append a numeric suffix such as -1 or -2.',
+            })}
+          />
+
+          <Alert variant="light">
+            {t('download_file_name_pattern_notice', {
+              defaultValue:
+                'For safety, PigeonPod sanitizes file names. The actual saved file name may differ from your pattern. Use the actual saved file name as the final result.',
+            })}
+          </Alert>
+
+          <Group justify="space-between">
+            <Button variant="light" onClick={testSystemStorageConfig} loading={systemConfigTesting}>
+              {t('storage_test_connection', { defaultValue: 'Test connection' })}
+            </Button>
+            <Group>
+              <Button variant="default" onClick={handleCloseEditStorageConfig}>
+                {t('cancel')}
+              </Button>
+              <Button
+                loading={systemConfigSaving}
+                onClick={async () => {
+                  const success = await saveSystemConfig(
+                    t('storage_config_saved_apply_new_tasks', {
+                      defaultValue:
+                        'Storage configuration saved. New download tasks will use the updated storage strategy.',
+                    }),
+                  );
+                  if (success) {
+                    handleCloseEditStorageConfig();
+                  }
+                }}
+              >
+                {t('confirm')}
+              </Button>
+            </Group>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={confirmStorageSwitchOpened}
+        onClose={cancelStorageTypeSwitch}
+        title={t('storage_switch_confirm_title', { defaultValue: 'Confirm storage switch' })}
+      >
+        <Stack>
+          <Alert color="red" variant="light">
+            {t('storage_switch_warning', {
+              defaultValue:
+                'Switching storage mode will not migrate existing media. You must migrate old files manually, otherwise old episodes may be inaccessible.',
+            })}
+          </Alert>
+          <Text size="sm">
+            {t('storage_switch_target', {
+              defaultValue: 'Target storage type: {{storageType}}',
+              storageType: pendingStorageType || '-',
+            })}
+          </Text>
+          <Group justify="flex-end">
+            <Button variant="default" onClick={cancelStorageTypeSwitch}>
+              {t('cancel')}
+            </Button>
+            <Button onClick={confirmStorageTypeSwitch}>{t('confirm')}</Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      {/* Date Format Edit Modal */}
+      <Modal
+        opened={editDateFormatOpened}
+        onClose={closeEditDateFormat}
+        title={t('edit_date_format')}
+      >
+        <Select
+          label={t('date_format')}
+          placeholder={t('select_date_format')}
+          data={DATE_FORMAT_OPTIONS}
+          value={dateFormat}
+          onChange={setDateFormat}
+          leftSection={<IconCalendar size={16} />}
+          withAsterisk
+        />
+        <Group justify="flex-end" mt="md">
+          <Button
+            onClick={() => {
+              saveDateFormat().then();
+            }}
+          >
+            {t('confirm')}
+          </Button>
+        </Group>
+      </Modal>
+
+      {/* Feed Defaults Edit Modal */}
+      <Modal
+        opened={editFeedDefaultsOpened}
+        onClose={closeEditFeedDefaults}
+        title={t('edit_feed_defaults', { defaultValue: 'Edit feed defaults' })}
+        size="lg"
+      >
+        <Stack>
+          <NumberInput
+            label={t('auto_download_limit')}
+            description={t('auto_download_limit_description', {
+              defaultValue: 'Default number of episodes to auto download for new feeds.',
+            })}
+            value={feedDefaults.autoDownloadLimit}
+            onChange={(value) =>
+              setFeedDefaults((prev) => ({
+                ...prev,
+                autoDownloadLimit: value === '' ? null : value,
+              }))
+            }
+            min={1}
+            placeholder={t('3')}
+            clampBehavior="strict"
+          />
+
+          <NumberInput
+            label={t('auto_download_delay_minutes')}
+            description={t('auto_download_delay_minutes_description')}
+            value={feedDefaults.autoDownloadDelayMinutes}
+            onChange={(value) =>
+              setFeedDefaults((prev) => ({
+                ...prev,
+                autoDownloadDelayMinutes: value === '' ? null : value,
+              }))
+            }
+            min={0}
+            clampBehavior="strict"
+          />
+
+          <NumberInput
+            label={t('minimum_duration_minutes')}
+            value={feedDefaults.minimumDuration}
+            onChange={(value) =>
+              setFeedDefaults((prev) => ({
+                ...prev,
+                minimumDuration: value === '' ? null : value,
+              }))
+            }
+            min={0}
+            placeholder="0"
+            clampBehavior="strict"
+          />
+
+          <NumberInput
+            label={t('maximum_episodes')}
+            description={t('default_maximum_episodes_description')}
+            value={feedDefaults.maximumEpisodes}
+            onChange={(value) =>
+              setFeedDefaults((prev) => ({
+                ...prev,
+                maximumEpisodes: value === '' ? null : value,
+              }))
+            }
+            min={1}
+            placeholder={t('unlimited')}
+            clampBehavior="strict"
+          />
+
+          <Radio.Group
+            label={t('download_type')}
+            value={feedDefaults.downloadType || 'AUDIO'}
+            onChange={(value) => {
+              setFeedDefaults((prev) => ({
+                ...prev,
+                downloadType: value,
+                audioQuality: value === 'VIDEO' ? null : prev.audioQuality,
+                videoQuality: value === 'AUDIO' ? '' : prev.videoQuality,
+                videoEncoding: value === 'AUDIO' ? '' : prev.videoEncoding,
+              }));
+            }}
+          >
+            <Group mt="xs">
+              <Radio value="AUDIO" label={t('audio')} />
+              <Radio value="VIDEO" label={t('video')} />
+            </Group>
+          </Radio.Group>
+
+          {(feedDefaults.downloadType || 'AUDIO') === 'AUDIO' ? (
+            <NumberInput
+              label={t('audio_quality')}
+              description={t('audio_quality_description')}
+              value={feedDefaults.audioQuality}
+              onChange={(value) =>
+                setFeedDefaults((prev) => ({
+                  ...prev,
+                  audioQuality: value === '' ? null : value,
+                }))
+              }
+              min={0}
+              max={10}
+              clampBehavior="strict"
+            />
+          ) : (
+            <>
+              <Select
+                label={t('video_quality')}
+                description={t('video_quality_description')}
+                data={[
+                  { value: '', label: t('best') },
+                  { value: '2160', label: '2160p' },
+                  { value: '1440', label: '1440p' },
+                  { value: '1080', label: '1080p' },
+                  { value: '720', label: '720p' },
+                  { value: '480', label: '480p' },
+                ]}
+                value={feedDefaults.videoQuality || ''}
+                onChange={(value) =>
+                  setFeedDefaults((prev) => ({
+                    ...prev,
+                    videoQuality: value || '',
+                  }))
+                }
+              />
+              <Select
+                label={t('video_encoding')}
+                description={t('video_encoding_description')}
+                data={[
+                  { value: '', label: t('default') },
+                  { value: 'H264', label: 'H.264' },
+                  { value: 'H265', label: 'H.265' },
+                ]}
+                value={feedDefaults.videoEncoding || ''}
+                onChange={(value) =>
+                  setFeedDefaults((prev) => ({
+                    ...prev,
+                    videoEncoding: value || '',
+                  }))
+                }
+              />
+            </>
+          )}
+
+          <MultiSelect
+            label={t('subtitle_languages')}
+            description={t('subtitle_languages_desc')}
+            placeholder={t('select_subtitle_languages')}
+            value={
+              feedDefaults.subtitleLanguages
+                ? feedDefaults.subtitleLanguages.split(',').filter(Boolean)
+                : []
+            }
+            onChange={(value) =>
+              setFeedDefaults((prev) => ({
+                ...prev,
+                subtitleLanguages: value.length > 0 ? value.join(',') : null,
+              }))
+            }
+            data={SUBTITLE_LANGUAGE_OPTIONS}
+            searchable
+            clearable
+          />
+
+          <Select
+            label={t('subtitle_format')}
+            description={t('subtitle_format_desc')}
+            value={feedDefaults.subtitleFormat || ''}
+            onChange={(value) =>
+              setFeedDefaults((prev) => ({
+                ...prev,
+                subtitleFormat: value || null,
+              }))
+            }
+            data={[
+              { value: '', label: t('default') },
+              ...SUBTITLE_FORMAT_OPTIONS.map((opt) => ({
+                ...opt,
+                label: opt.value === 'vtt' ? opt.label + ' - ' + t('recommended') : opt.label,
+              })),
+            ]}
+          />
+
+          <Group justify="space-between" mt="md">
+            <Button variant="default" onClick={openApplyFeedDefaults}>
+              {t('apply_feed_defaults', { defaultValue: 'Apply' })}
+            </Button>
+            <Button
+              onClick={() => {
+                saveFeedDefaults().then((success) => {
+                  if (success) {
+                    closeEditFeedDefaults();
+                  }
+                });
+              }}
+            >
+              {t('confirm')}
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      {/* Apply Feed Defaults Modal */}
+      <Modal
+        opened={applyFeedDefaultsOpened}
+        onClose={closeApplyFeedDefaults}
+        title={t('apply_feed_defaults_title', { defaultValue: 'Apply feed defaults' })}
+      >
+        <Stack>
+          <Text size="sm">
+            {t('apply_feed_defaults_description', {
+              defaultValue: 'Choose how to apply current defaults to existing feeds.',
+            })}
+          </Text>
+          <Radio.Group
+            label={t('apply_feed_defaults_mode', { defaultValue: 'Apply mode' })}
+            value={applyFeedDefaultsMode}
+            onChange={setApplyFeedDefaultsMode}
+          >
+            <Stack mt="xs" gap="xs">
+              <Radio
+                value="override_all"
+                label={t('apply_feed_defaults_mode_override_all', {
+                  defaultValue: 'Override all feeds',
+                })}
+              />
+              <Radio
+                value="fill_empty"
+                label={t('apply_feed_defaults_mode_fill_empty', {
+                  defaultValue: 'Only unconfigured feeds',
+                })}
+              />
+            </Stack>
+          </Radio.Group>
+          <Group justify="flex-end">
+            <Button variant="default" onClick={closeApplyFeedDefaults}>
+              {t('cancel')}
+            </Button>
+            <Button
+              onClick={() => {
+                applyFeedDefaults().then();
+              }}
+              loading={applyingFeedDefaults}
+            >
+              {t('confirm')}
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <Modal
+        opened={editSslConfigOpened}
+        onClose={closeEditSslConfig}
+        title={t('ssl_settings_label', { defaultValue: 'HTTPS Settings' })}
+        size="lg"
+      >
+        <Stack gap="sm">
+          <Switch
+            checked={Boolean(systemConfig.sslEnabled)}
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
+              setSystemConfig((prev) => ({
+                ...prev,
+                sslEnabled: checked,
+              }));
+            }}
+            label={t('ssl_enabled_label', { defaultValue: 'Enable HTTPS' })}
+          />
+
+          <NumberInput
+            label={t('ssl_port_label', { defaultValue: 'HTTPS Port' })}
+            placeholder="8443"
+            min={1}
+            max={65535}
+            value={systemConfig.sslPort}
+            onChange={(value) =>
+              setSystemConfig((prev) => ({
+                ...prev,
+                sslPort: value,
+              }))
+            }
+            disabled={!systemConfig.sslEnabled}
+          />
+
+          <Switch
+            checked={Boolean(systemConfig.httpsOnly)}
+            onChange={(event) => {
+              const checked = event.currentTarget.checked;
+              setSystemConfig((prev) => ({
+                ...prev,
+                httpsOnly: checked,
+              }));
+            }}
+            label={t('https_only_label', { defaultValue: 'HTTPS Only' })}
+            description={t('https_only_desc', { defaultValue: 'Disables HTTP listener when enabled' })}
+            disabled={!systemConfig.sslEnabled}
+          />
+
+          <Divider label={t('ssl_certificates_label', { defaultValue: 'Certificates' })} labelPosition="center" />
+
+          <Group grow>
+            <Stack gap={4}>
+              <Text size="sm" fw={500}>{t('ssl_cert_label', { defaultValue: 'Certificate (PEM)' })}</Text>
+              <Group gap="xs">
+                <FileButton onChange={(file) => handleSslFileUpload('cert', file)} accept=".pem,.crt">
+                  {(props) => <Button {...props} size="xs" variant="light">{t('upload')}</Button>}
+                </FileButton>
+                {systemConfig.sslCertificatePath && (
+                  <Badge variant="dot" color="green" size="sm">{t('uploaded')}</Badge>
+                )}
+              </Group>
+            </Stack>
+
+            <Stack gap={4}>
+              <Text size="sm" fw={500}>{t('ssl_key_label', { defaultValue: 'Private Key (PEM)' })}</Text>
+              <Group gap="xs">
+                <FileButton onChange={(file) => handleSslFileUpload('key', file)} accept=".pem,.key">
+                  {(props) => <Button {...props} size="xs" variant="light">{t('upload')}</Button>}
+                </FileButton>
+                {systemConfig.sslKeyPath && (
+                  <Badge variant="dot" color="green" size="sm">{t('uploaded')}</Badge>
+                )}
+              </Group>
+            </Stack>
+          </Group>
+
+          <Alert color="blue" variant="light" mt="sm">
+            {t('ssl_restart_hint', { defaultValue: 'Changes to HTTPS settings require a server restart to take effect.' })}
+          </Alert>
+
+          <Group justify="flex-end" mt="md">
+            <Button variant="default" onClick={closeEditSslConfig}>
+              {t('cancel')}
+            </Button>
+            <Button
+              loading={systemConfigSaving}
+              onClick={async () => {
+                const success = await saveSystemConfig(
+                  t('ssl_config_saved', { defaultValue: 'HTTPS configuration saved. Please restart the server.' }),
+                );
+                if (success) {
+                  closeEditSslConfig();
+                }
+              }}
+            >
+              {t('confirm')}
+            </Button>
+          </Group>
+        </Stack>
+      </Modal>
+
+      <CookieConfigModal
+        opened={uploadCookiesOpened}
+        onClose={closeUploadCookies}
+        cookieConfigs={cookieConfigs}
+        onUpload={handleUploadCookie}
+        onDelete={handleDeleteCookie}
+      />
+    </Container>
+  );
+};
+
+export default UserSetting;

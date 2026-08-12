@@ -1,0 +1,887 @@
+import React, { useCallback, useEffect, useState, useContext } from 'react';
+import {
+  API,
+  formatDateWithPattern,
+  formatISODuration,
+  showError,
+  showSuccess,
+} from '../../helpers';
+import {
+  Container,
+  Button,
+  Card,
+  Grid,
+  Group,
+  Input,
+  ActionIcon,
+  Image,
+  Text,
+  Anchor,
+  Modal,
+  Stack,
+  Center,
+  Box,
+  Alert,
+  NumberInput,
+  Skeleton,
+  rem,
+} from '@mantine/core';
+import { useTranslation } from 'react-i18next';
+import {
+  IconCheck,
+  IconPlus,
+  IconSearch,
+  IconSettings,
+  IconClockHour4,
+  IconDownload,
+  IconCircleCheck,
+  IconAlertCircle,
+  IconX,
+} from '@tabler/icons-react';
+import { useNavigate } from 'react-router-dom';
+import { useDisclosure, useMediaQuery } from '@mantine/hooks';
+import EditFeedModal from '../../components/EditFeedModal';
+import FeedCard from '../../components/FeedCard/FeedCard.jsx';
+import { useDateFormat } from '../../hooks/useDateFormat.js';
+import FeedHeader from '../../components/FeedHeader';
+import StatisticsCard from '../../components/StatisticsCard/StatisticsCard.jsx';
+import { UserContext } from '../../context/User/UserContext.jsx';
+
+const INVALID_SOURCE_MESSAGE_PATTERNS = [
+  'Invalid YouTube channel URL',
+  'Invalid YouTube playlist URL',
+  'Invalid YouTube video URL',
+  '无效的YouTube频道URL',
+  '无效的YouTube播放列表URL',
+  '无效的 YouTube 视频 URL',
+  'URL de canal de YouTube inválida',
+  'URL de lista de reproducción de YouTube inválida',
+  'URL do canal do YouTube inválida',
+  'URL de playlist do YouTube inválida',
+  '無効なYouTubeチャンネルURLです',
+  '無効なYouTubeプレイリストURLです',
+  'URL de chaîne YouTube invalide',
+  'URL de playlist YouTube invalide',
+  'Ungültige YouTube-Kanal-URL',
+  'Ungültige YouTube-Playlist-URL',
+  '유효하지 않은 YouTube 채널 URL입니다',
+  '유효하지 않은 YouTube 플레이리스트 URL입니다',
+];
+
+function isValidFeedSource(source) {
+  if (!source) {
+    return false;
+  }
+
+  const trimmed = source.trim();
+  if (!trimmed) {
+    return false;
+  }
+
+  const isYouTubeHandleUrl =
+    /^https?:\/\/(?:www\.|m\.)?youtube\.com\/@[^/?#\s]+(?:[/?#].*)?$/i.test(trimmed);
+  const isYouTubeChannelUrl =
+    /^https?:\/\/(?:www\.|m\.)?youtube\.com\/channel\/UC[A-Za-z0-9_-]{22}(?:[/?#].*)?$/i.test(
+      trimmed,
+    );
+  const isYouTubeChannelId = /^UC[A-Za-z0-9_-]{22}$/.test(trimmed);
+  const isYouTubePlaylistUrl =
+    /^https?:\/\/(?:www\.|m\.)?youtube\.com\/(?:playlist|watch)\?(?:[^#]*&)?list=[A-Za-z0-9_-]{13,64}(?:[&#].*)?$/i.test(
+      trimmed,
+    );
+  const isYouTubePlaylistId = /^(PL|UU|OL|LL)[A-Za-z0-9_-]{10,}$/i.test(trimmed);
+  const isYouTubeVideoUrl =
+    /^https?:\/\/(?:www\.|m\.)?youtube\.com\/watch\?(?=[^#]*v=[A-Za-z0-9_-]{11})(?![^#]*list=)[^#]*(?:#.*)?$/i.test(
+      trimmed,
+    );
+  const isYouTubeShortsUrl =
+    /^https?:\/\/(?:www\.|m\.)?youtube\.com\/shorts\/[A-Za-z0-9_-]{11}(?:[/?#].*)?$/i.test(
+      trimmed,
+    );
+  const isYouTubeShortUrl =
+    /^https?:\/\/youtu\.be\/[A-Za-z0-9_-]{11}(?:[/?#].*)?$/i.test(trimmed);
+
+  return (
+    isYouTubeHandleUrl ||
+    isYouTubeChannelUrl ||
+    isYouTubeChannelId ||
+    isYouTubePlaylistUrl ||
+    isYouTubePlaylistId ||
+    isYouTubeVideoUrl ||
+    isYouTubeShortsUrl ||
+    isYouTubeShortUrl
+  );
+}
+
+function shouldShowSourceFormatModal(message) {
+  if (!message) {
+    return false;
+  }
+
+  const normalizedMessage = String(message).toLowerCase();
+  return INVALID_SOURCE_MESSAGE_PATTERNS.some((pattern) =>
+    normalizedMessage.includes(pattern.toLowerCase()),
+  );
+}
+
+function StatisticsSkeletonGrid() {
+  return (
+    <Grid gutter="md" mb="lg">
+      {Array.from({ length: 4 }).map((_, index) => (
+        <Grid.Col key={`statistics-skeleton-${index}`} span={{ base: 6, sm: 3 }}>
+          <Skeleton height={184} radius="md" />
+        </Grid.Col>
+      ))}
+    </Grid>
+  );
+}
+
+function HomeToolbarSkeleton({ isSmallScreen }) {
+  return (
+    <Box mt={isSmallScreen ? 'md' : 0}>
+      {isSmallScreen ? (
+        <Group justify="space-between" wrap="nowrap">
+          <Skeleton height={32} width={112} radius="sm" />
+          <Group gap="xs" wrap="nowrap">
+            <Skeleton height={44} width={44} radius="xl" />
+            <Skeleton height={44} width={44} radius="xl" />
+          </Group>
+        </Group>
+      ) : (
+        <Group pos="relative" wrap="nowrap" gap="sm">
+          <Skeleton height={36} radius="md" style={{ flex: 1 }} />
+          <Skeleton height={36} width={108} radius="md" />
+        </Group>
+      )}
+    </Box>
+  );
+}
+
+function FeedGridSkeleton({ isSmallScreen }) {
+  return (
+    <Grid mt={isSmallScreen ? 'md' : 'lg'}>
+      {Array.from({ length: isSmallScreen ? 6 : 12 }).map((_, index) => (
+        <Grid.Col key={`feed-skeleton-${index}`} span={{ base: 6, xs: 4, sm: 3, md: 2, lg: 2, xl: 2 }}>
+          <Card shadow="sm" padding="sm" radius="sm">
+            <Skeleton height={160} radius="sm" />
+            <Skeleton mt="sm" height={18} width="78%" radius="sm" />
+            <Skeleton mt="xs" height={14} width="58%" radius="sm" />
+          </Card>
+        </Grid.Col>
+      ))}
+    </Grid>
+  );
+}
+
+const Home = () => {
+  const { t } = useTranslation();
+  const navigate = useNavigate();
+  const contextValue = useContext(UserContext);
+  const userState = Array.isArray(contextValue) ? contextValue[0] : (contextValue?.state || contextValue);
+  const isAdmin = userState?.user?.role === 'admin';
+  const dateFormat = useDateFormat();
+  const isSmallScreen = useMediaQuery('(max-width: 36em)');
+  const [isFeedListLoading, setIsFeedListLoading] = useState(true);
+  const [isStatisticsLoading, setIsStatisticsLoading] = useState(true);
+  const [feedSource, setFeedSource] = useState('');
+  const [fetchFeedLoading, setFetchFeedLoading] = useState(false);
+  const [filterLoading, setFilterLoading] = useState(false);
+  const [addFeedLoading, setAddFeedLoading] = useState(false);
+  const [feed, setFeed] = useState({});
+  const [episodes, setEpisodes] = useState([]);
+  const [feeds, setFeeds] = useState([]);
+  const [preview, setPreview] = useState(false);
+  const [opened, { open, close }] = useDisclosure(false);
+  const [invalidSourceOpened, { open: openInvalidSourceModal, close: closeInvalidSourceModal }] =
+    useDisclosure(false);
+  const [sourceFormatModalScene, setSourceFormatModalScene] = useState('guide');
+  const [editConfigOpened, { open: openEditConfig, close: closeEditConfig }] = useDisclosure(false);
+  const [mobileNewFeedOpen, setMobileNewFeedOpen] = useState(false);
+  const [mobileSearchOpen, setMobileSearchOpen] = useState(false);
+  const [mobileFeedSearch, setMobileFeedSearch] = useState('');
+  const isPlaylistFeed = String(feed?.type || '').toLowerCase() === 'playlist';
+  const [statistics, setStatistics] = useState({
+    pendingCount: 0,
+    downloadingCount: 0,
+    completedCount: 0,
+    failedCount: 0,
+  });
+  const [youtubeQuotaToday, setYoutubeQuotaToday] = useState(null);
+
+  const fetchFeeds = useCallback(async () => {
+    try {
+      const res = await API.get('/api/feed/list');
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return;
+      }
+      setFeeds(data);
+    } finally {
+      setIsFeedListLoading(false);
+    }
+  }, []);
+
+  const fetchStatistics = useCallback(async () => {
+    try {
+      const res = await API.get('/api/dashboard/statistics');
+      const { code, data } = res.data;
+      if (code === 200) {
+        setStatistics(data);
+      }
+    } catch (error) {
+      // Silently fail if statistics endpoint is not available
+      console.error('Failed to fetch statistics:', error);
+    } finally {
+      setIsStatisticsLoading(false);
+    }
+  }, []);
+
+  const fetchYoutubeQuotaToday = useCallback(async () => {
+    try {
+      const res = await API.get('/api/account/youtube-quota/today');
+      const { code, data } = res.data;
+      if (code === 200) {
+        setYoutubeQuotaToday(data);
+      }
+    } catch (error) {
+      console.error('Failed to fetch YouTube quota:', error);
+    }
+  }, []);
+
+  const goToFeedDetail = (type, feedId) => {
+    const normalizedType = String(type || 'CHANNEL').toLowerCase();
+    navigate(`/${normalizedType}/${feedId}`);
+  };
+
+  const openSourceFormatGuideModal = () => {
+    setSourceFormatModalScene('guide');
+    openInvalidSourceModal();
+  };
+
+  const openSourceFormatResultModal = () => {
+    setSourceFormatModalScene('result');
+    openInvalidSourceModal();
+  };
+
+  const fetchFeed = async () => {
+    if (!feedSource) {
+      showError(t('please_enter_valid_feed_url'));
+      return;
+    }
+    const normalizedFeedSource = feedSource.trim();
+    if (!isValidFeedSource(normalizedFeedSource)) {
+      openSourceFormatGuideModal();
+      return;
+    }
+
+    setFetchFeedLoading(true);
+    const res = await API.post('/api/feed/fetch', {
+      source: normalizedFeedSource,
+    });
+    const { code, msg, data } = res.data;
+    if (code !== 200) {
+      if (shouldShowSourceFormatModal(msg)) {
+        openSourceFormatGuideModal();
+      } else {
+        showError(msg);
+      }
+      setFetchFeedLoading(false);
+      return;
+    }
+
+    setMobileNewFeedOpen(false);
+    open();
+
+    setFeed(data.feed);
+    setEpisodes(data.episodes || []);
+
+    setFetchFeedLoading(false);
+    setFeedSource(''); // Clear the input field after successful addition
+  };
+
+  const addFeed = async () => {
+    const currentType = String(feed?.type || 'CHANNEL').toLowerCase();
+    setAddFeedLoading(true);
+    const res = await API.post(`/api/feed/${currentType}/add`, feed);
+    const { code, msg, data } = res.data;
+    if (code !== 200) {
+      showError(msg);
+      setAddFeedLoading(false);
+      return;
+    }
+
+    showSuccess(data.message);
+
+    // Add the new feed at the beginning of the feeds list
+    setFeeds((prevFeeds) => {
+      const nextFeeds = prevFeeds.filter(
+        (feedItem) => !(feedItem?.id === data.feed?.id && feedItem?.type === data.feed?.type),
+      );
+      return [data.feed, ...nextFeeds];
+    });
+    setFeed(data.feed);
+
+    setAddFeedLoading(false);
+    close();
+  };
+
+  const previewFeed = async () => {
+    if (!preview) {
+      closeEditConfig();
+      return;
+    }
+    setFilterLoading(true);
+    const currentType = String(feed?.type || 'CHANNEL').toLowerCase();
+    const res = await API.post(`/api/feed/${currentType}/preview`, feed);
+    const { code, msg, data } = res.data;
+    if (code !== 200) {
+      showError(msg);
+      setFilterLoading(false);
+      return;
+    }
+    setFeed(data.feed || feed);
+    setEpisodes(data.episodes || []);
+    setFilterLoading(false);
+    closeEditConfig();
+  };
+
+  useEffect(() => {
+    fetchFeeds().then();
+  }, [fetchFeeds]);
+
+  useEffect(() => {
+    if (!isAdmin) {
+      setIsStatisticsLoading(false);
+      setYoutubeQuotaToday(null);
+      return undefined;
+    }
+
+    setIsStatisticsLoading(true);
+    if (isAdmin) {
+      fetchStatistics().then();
+      fetchYoutubeQuotaToday().then();
+    }
+
+    // Set up polling for statistics every 3 seconds
+    const statisticsInterval = isAdmin ? setInterval(() => {
+      fetchStatistics();
+    }, 3000) : null;
+    const quotaInterval = isAdmin ? setInterval(() => {
+      fetchYoutubeQuotaToday();
+    }, 30000) : null;
+
+    // Cleanup interval on component unmount
+    return () => {
+      if (statisticsInterval) clearInterval(statisticsInterval);
+      if (quotaInterval) clearInterval(quotaInterval);
+    };
+  }, [fetchStatistics, fetchYoutubeQuotaToday, isAdmin]);
+
+  useEffect(() => {
+    if (!isSmallScreen) {
+      setMobileNewFeedOpen(false);
+      setMobileSearchOpen(false);
+      setMobileFeedSearch('');
+    }
+  }, [isSmallScreen]);
+
+  const openStatusDetail = (status) => {
+    const normalized = String(status || '').toLowerCase();
+    navigate(`/dashboard/episodes/${normalized}`);
+  };
+
+  const closeMobileSearch = () => {
+    setMobileSearchOpen(false);
+    setMobileFeedSearch('');
+  };
+
+  const closeMobileNewFeed = () => {
+    setMobileNewFeedOpen(false);
+    setFeedSource('');
+  };
+
+  const mobileFeedSearchQuery = mobileFeedSearch.trim().toLowerCase();
+  const visibleFeeds =
+    isSmallScreen && mobileFeedSearchQuery
+      ? feeds.filter((feedItem) =>
+          [feedItem?.customTitle, feedItem?.title].some((value) =>
+            String(value || '')
+              .toLowerCase()
+              .includes(mobileFeedSearchQuery),
+          ),
+        )
+      : feeds;
+  const showNoMatchingFeeds =
+    isSmallScreen && Boolean(mobileFeedSearchQuery) && visibleFeeds.length === 0;
+
+  const modalActions = [
+    {
+      key: 'config',
+      label: t('config'),
+      color: 'orange',
+      leftSectionDesktop: <IconSettings size={16} />,
+      leftSectionMobile: <IconSettings size={14} />,
+      onClick: openEditConfig,
+      sizeDesktop: isSmallScreen ? 'compact-xs' : 'xs',
+      sizeMobile: 'xs',
+    },
+    {
+      key: 'confirm',
+      label: t('confirm'),
+      leftSectionDesktop: <IconCheck size={16} />,
+      leftSectionMobile: <IconCheck size={14} />,
+      onClick: addFeed,
+      loading: addFeedLoading,
+      sizeDesktop: isSmallScreen ? 'compact-xs' : 'xs',
+      sizeMobile: 'xs',
+    },
+  ];
+  const supportedSourceFormats = [
+    {
+      key: 'youtube_channel_id',
+      label: t('feed_source_format_youtube_channel_id'),
+      examples: [
+        {
+          label: t('feed_source_example_id'),
+          value: 'UCSJ4gkVC6NrvII8umztf0Ow',
+        },
+      ],
+      tip: t('feed_source_format_youtube_channel_id_tip'),
+    },
+    {
+      key: 'youtube_channel_url',
+      label: t('feed_source_format_youtube_channel_url'),
+      examples: [
+        {
+          label: t('feed_source_example_handler_url'),
+          value: 'https://www.youtube.com/@LofiGirl',
+        },
+        {
+          label: t('feed_source_example_channel_url'),
+          value: 'https://www.youtube.com/channel/UCSJ4gkVC6NrvII8umztf0Ow',
+        },
+      ],
+    },
+    {
+      key: 'youtube_playlist_url',
+      label: t('feed_source_format_youtube_playlist_url'),
+      examples: [
+        {
+          label: t('feed_source_example_playlist_url'),
+          value: 'https://www.youtube.com/playlist?list=PLFgquLnL59anNXuf1M87FT1O169Qt6-Lp',
+        },
+        {
+          label: t('feed_source_example_playlist_id'),
+          value: 'PLFgquLnL59anNXuf1M87FT1O169Qt6-Lp',
+        },
+      ],
+    },
+  ];
+
+  return (
+    <Container size="lg" mt="lg">
+      {youtubeQuotaToday?.warningReached ? (
+        <Alert color="red" variant="light" mb="md" icon={<IconAlertCircle size={18} />}>
+          <Text size="sm">
+            {youtubeQuotaToday.autoSyncBlocked
+              ? t('home_youtube_quota_blocked', {
+                  defaultValue:
+                    'YouTube API daily limit has been reached ({{used}} / {{limit}}). Auto sync is stopped for today and will resume tomorrow.',
+                  used: youtubeQuotaToday.usedUnits ?? 0,
+                  limit:
+                    youtubeQuotaToday.dailyLimitUnits ??
+                    t('youtube_daily_limit_unlimited', { defaultValue: 'Unlimited' }),
+                })
+              : t('home_youtube_quota_warning', {
+                  defaultValue:
+                    'YouTube API usage is {{used}} / {{limit}} (>=80%). Once the daily limit is reached, auto sync will stop for today and resume tomorrow.',
+                  used: youtubeQuotaToday.usedUnits ?? 0,
+                  limit:
+                    youtubeQuotaToday.dailyLimitUnits ??
+                    t('youtube_daily_limit_unlimited', { defaultValue: 'Unlimited' }),
+                })}
+          </Text>
+        </Alert>
+      ) : null}
+
+      {isAdmin ? (
+        isStatisticsLoading ? (
+          <StatisticsSkeletonGrid />
+        ) : (
+          <Grid gutter="md" mb="lg">
+            <Grid.Col span={{ base: 6, sm: 3 }}>
+              <StatisticsCard
+                label={t('dashboard_pending')}
+                count={statistics.pendingCount}
+                icon={<IconClockHour4 />}
+                color="gray"
+                onClick={() => openStatusDetail('PENDING')}
+              />
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 6, sm: 3 }}>
+              <StatisticsCard
+                label={t('dashboard_downloading')}
+                count={statistics.downloadingCount}
+                icon={<IconDownload />}
+                color="blue"
+                onClick={() => openStatusDetail('DOWNLOADING')}
+              />
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 6, sm: 3 }}>
+              <StatisticsCard
+                label={t('dashboard_completed')}
+                count={statistics.completedCount}
+                icon={<IconCircleCheck />}
+                color="green"
+                onClick={() => openStatusDetail('COMPLETED')}
+              />
+            </Grid.Col>
+
+            <Grid.Col span={{ base: 6, sm: 3 }}>
+              <StatisticsCard
+                label={t('dashboard_failed')}
+                count={statistics.failedCount}
+                icon={<IconAlertCircle />}
+                color="red"
+                onClick={() => openStatusDetail('FAILED')}
+              />
+            </Grid.Col>
+          </Grid>
+        )
+      ) : null}
+
+      {isFeedListLoading ? <HomeToolbarSkeleton isSmallScreen={isSmallScreen} /> : null}
+
+      {isFeedListLoading ? null : isSmallScreen ? null : isAdmin && (
+        <Group pos="relative" wrap="nowrap" gap="sm">
+          <Input
+            rightSection={
+              <ActionIcon
+                variant="subtle"
+                color="gray"
+                size="sm"
+                radius="xl"
+                onClick={openSourceFormatGuideModal}
+                aria-label={t('feed_source_result_not_expected')}
+                title={t('feed_source_result_not_expected')}
+              >
+                ?
+              </ActionIcon>
+            }
+            rightSectionPointerEvents="all"
+            placeholder={t('enter_feed_source_url')}
+            name="feedSource"
+            value={feedSource}
+            onChange={(e) => setFeedSource(decodeURIComponent(e.target.value))}
+            style={{ flex: 1, minWidth: 0 }}
+          />
+          <Button
+            variant="default"
+            onClick={fetchFeed}
+            loading={fetchFeedLoading}
+            style={{ flexShrink: 0 }}
+          >
+            {t('preview')}
+          </Button>
+        </Group>
+      )}
+
+      {!isFeedListLoading && isSmallScreen ? (
+        <Box mt="md">
+          {mobileSearchOpen ? (
+            <Group gap="xs" wrap="nowrap" align="center">
+              <Input
+                autoFocus
+                leftSection={<IconSearch size={16} />}
+                rightSection={
+                  mobileFeedSearch ? (
+                    <ActionIcon
+                      variant="subtle"
+                      color="gray"
+                      size="sm"
+                      radius="xl"
+                      onClick={() => setMobileFeedSearch('')}
+                      aria-label={t('clear', { defaultValue: 'Clear' })}
+                      title={t('clear', { defaultValue: 'Clear' })}
+                    >
+                      <IconX size={14} />
+                    </ActionIcon>
+                  ) : null
+                }
+                rightSectionPointerEvents="all"
+                placeholder={t('search_feeds', { defaultValue: 'Search feeds' })}
+                value={mobileFeedSearch}
+                onChange={(e) => setMobileFeedSearch(e.target.value)}
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              <Button variant="default" color="gray" onClick={closeMobileSearch}>
+                {t('cancel')}
+              </Button>
+            </Group>
+          ) : mobileNewFeedOpen ? (
+            <Stack gap="xs" align="stretch">
+              <Input
+                autoFocus
+                rightSection={
+                  <ActionIcon
+                    variant="subtle"
+                    color="gray"
+                    size="sm"
+                    radius="xl"
+                    onClick={openSourceFormatGuideModal}
+                    aria-label={t('feed_source_result_not_expected')}
+                    title={t('feed_source_result_not_expected')}
+                  >?</ActionIcon>
+                }
+                rightSectionPointerEvents="all"
+                placeholder={t('enter_feed_source_url')}
+                name="feedSource"
+                value={feedSource}
+                onChange={(e) => setFeedSource(decodeURIComponent(e.target.value))}
+                style={{ flex: 1, minWidth: 0 }}
+              />
+              <Group justify="space-between" grow>
+                <Button variant="default" size="sm" onClick={fetchFeed} loading={fetchFeedLoading}>
+                  {t('preview')}
+                </Button>
+                <Button variant="default" color="gray" onClick={closeMobileNewFeed}>
+                  {t('cancel')}
+                </Button>
+              </Group>
+            </Stack>
+          ) : (
+            <Group justify="space-between" wrap="nowrap">
+              <Text fw={600}>{t('my_feeds', { defaultValue: 'My Feeds' })}</Text>
+              <Group gap="xs" wrap="nowrap">
+                {isAdmin && (
+                  <ActionIcon
+                    variant="light"
+                    size="lg"
+                    radius="xl"
+                    color="gray"
+                    onClick={() => {
+                      setMobileSearchOpen(false);
+                      setMobileNewFeedOpen(true);
+                    }}
+                    aria-label={t('new_feed')}
+                    title={t('new_feed')}
+                  >
+                    <IconPlus size={18} />
+                  </ActionIcon>
+                )}
+                <ActionIcon
+                  variant="light"
+                  size="lg"
+                  radius="xl"
+                  color="gray"
+                  onClick={() => {
+                    closeMobileNewFeed();
+                    setMobileSearchOpen(true);
+                  }}
+                  aria-label={t('search_feeds', { defaultValue: 'Search feeds' })}
+                  title={t('search_feeds', { defaultValue: 'Search feeds' })}
+                >
+                  <IconSearch size={18} />
+                </ActionIcon>
+              </Group>
+            </Group>
+          )}
+        </Box>
+      ) : null}
+
+      {isFeedListLoading ? (
+        <FeedGridSkeleton isSmallScreen={isSmallScreen} />
+      ) : (
+        <Grid mt={isSmallScreen ? 'md' : 'lg'}>
+          {visibleFeeds.length > 0 ? (
+            visibleFeeds.map((feedItem) => {
+              const isAutoDownloadEnabled = feedItem?.autoDownloadEnabled !== false;
+              const pausedTooltip = t('auto_download_paused_tooltip');
+
+              return (
+                <FeedCard
+                  key={feedItem.id}
+                  feed={feedItem}
+                  onClick={() => goToFeedDetail(feedItem.type, feedItem.id)}
+                  dimmed={!isAutoDownloadEnabled}
+                  withTooltip={!isAutoDownloadEnabled}
+                  tooltipLabel={pausedTooltip}
+                />
+              );
+            })
+          ) : (
+            <Grid.Col span={12}>
+              <Text align="center" c="dimmed" size="lg">
+                {showNoMatchingFeeds
+                  ? t('no_matching_feeds', { defaultValue: 'No matching feeds' })
+                  : t('no_feeds_available')}
+              </Text>
+            </Grid.Col>
+          )}
+        </Grid>
+      )}
+
+      <Modal
+        opened={opened}
+        onClose={close}
+        withCloseButton
+        title={t('subscription_configuration')}
+        size={'xl'}
+        fullScreen={isSmallScreen}
+        closeOnEscape={!editConfigOpened}
+      >
+        <Stack gap="xs">
+          <FeedHeader
+            feed={feed}
+            isSmallScreen={isSmallScreen}
+            actions={modalActions}
+            avatarSizeLarge={160}
+            descriptionClampSmall={2}
+            descriptionClampLarge={2}
+          />
+          <Anchor
+            component="button"
+            type="button"
+            size="sm"
+            onClick={openSourceFormatResultModal}
+            style={{ alignSelf: 'flex-start' }}
+            mt={-25}
+          >
+            {t('feed_source_result_not_expected')}
+          </Anchor>
+          <Box>
+            {episodes.length === 0 ? (
+              <Center py="xl">
+                <Text c="dimmed">{t('no_episodes_found')}</Text>
+              </Center>
+            ) : (
+              <Stack>
+                {episodes.map((episode) => (
+                  <Card key={episode.id} padding="md" radius="md" withBorder>
+                    <Grid align="flex-start">
+                      {/* Episode thumbnail */}
+                      <Grid.Col span={{ base: 12, sm: 3 }} style={{ alignSelf: 'flex-start' }}>
+                        <Image
+                          src={episode.maxCoverUrl || episode.defaultCoverUrl}
+                          alt={episode.title}
+                          referrerPolicy="no-referrer"
+                          radius="md"
+                          w="100%"
+                          h={{ base: rem(120), sm: '100%' }}
+                          fit="cover"
+                        />
+                      </Grid.Col>
+
+                      {/* Episode details */}
+                      <Grid.Col span={{ base: 12, sm: 9 }}>
+                        <Text
+                          fw={600}
+                          style={{
+                            whiteSpace: 'nowrap',
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                          }}
+                          title={episode.title}
+                        >
+                          {episode.title}
+                        </Text>
+                        <Text size="sm" lineClamp={2} style={{ minHeight: '2rem' }}>
+                          {episode.description
+                            ? episode.description
+                            : t('no_description_available')}
+                        </Text>
+                        <Group mt="xs" justify="space-between">
+                          <Text size="sm" c="dimmed">
+                            {episode.publishedAt
+                              ? formatDateWithPattern(episode.publishedAt, dateFormat)
+                              : t('unknown_date')}
+                          </Text>
+                          <Text c="dimmed" size="sm">
+                            {formatISODuration(episode.duration)}
+                          </Text>
+                        </Group>
+                      </Grid.Col>
+                    </Grid>
+                  </Card>
+                ))}
+              </Stack>
+            )}
+          </Box>
+        </Stack>
+      </Modal>
+      <EditFeedModal
+        opened={editConfigOpened}
+        onClose={closeEditConfig}
+        title={t('edit_feed_configuration')}
+        feed={feed}
+        onFeedChange={setFeed}
+        isPlaylist={isPlaylistFeed}
+        onPreview={() => setPreview(true)}
+        size="lg"
+        autoDownloadLimitField={
+          <NumberInput
+            label={t('auto_download_limit')}
+            name="autoDownloadLimit"
+            placeholder={t('3')}
+            value={feed.autoDownloadLimit}
+            onChange={(value) => setFeed({ ...feed, autoDownloadLimit: value })}
+            disabled={feed?.autoDownloadEnabled === false}
+          />
+        }
+        actionButtons={
+          <Group mt="md" justify={'flex-end'}>
+            <Button variant="default" onClick={closeEditConfig}>
+              {t('cancel')}
+            </Button>
+            <Button variant="filled" loading={filterLoading} onClick={previewFeed}>
+              {t('confirm')}
+            </Button>
+          </Group>
+        }
+      />
+      <Modal
+        opened={invalidSourceOpened}
+        onClose={closeInvalidSourceModal}
+        title={
+          sourceFormatModalScene === 'result'
+            ? t('feed_source_format_modal_title')
+            : t('feed_source_format_modal_title_guide')
+        }
+        size="xl"
+      >
+        <Stack gap="sm">
+          <Text size="sm" c="dimmed">
+            {t('feed_source_format_modal_description')}
+          </Text>
+          {supportedSourceFormats.map((formatItem, index) => (
+            <Box key={formatItem.key}>
+              <Text size="sm" fw={600}>
+                {index + 1}. {formatItem.label}
+              </Text>
+              {formatItem.examples.map((exampleItem) => (
+                <Text key={`${formatItem.key}-${exampleItem.value}`} size="sm" c="dimmed">
+                  <Text span fw={500}>
+                    {exampleItem.label}:
+                  </Text>{' '}
+                  <Text span ff="monospace">
+                    {exampleItem.value}
+                  </Text>
+                </Text>
+              ))}
+              {formatItem.tip ? (
+                <Text size="sm" c="darkgreen" mt={2}>
+                  {formatItem.tip}
+                </Text>
+              ) : null}
+            </Box>
+          ))}
+        </Stack>
+      </Modal>
+    </Container>
+  );
+};
+
+export default Home;

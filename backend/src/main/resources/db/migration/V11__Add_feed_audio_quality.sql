@@ -1,0 +1,2 @@
+ALTER TABLE channel ADD COLUMN audio_quality INTEGER NULL;
+ALTER TABLE playlist ADD COLUMN audio_quality INTEGER NULL;

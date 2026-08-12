@@ -1,0 +1,92 @@
+server:
+  port: 8080
+  shutdown: graceful
+
+spring:
+  application:
+    name: PigeonPod
+  messages:
+    encoding: UTF-8
+    basename: messages
+  lifecycle:
+    timeout-per-shutdown-phase: 10s
+  datasource:
+    url: jdbc:sqlite:data/pigeon-pod.db?journal_mode=WAL&synchronous=NORMAL&cache_size=10000&temp_store=memory&busy_timeout=3000
+    driver-class-name: org.sqlite.JDBC
+    hikari:
+      maximum-pool-size: 5  # 增加连接池大小，支持并发
+      minimum-idle: 1
+      connection-timeout: 30000
+      idle-timeout: 600000
+      max-lifetime: 1800000
+  flyway:
+    baseline-on-migrate: true
+    baseline-version: 1
+  sql:
+    init:
+      mode: never
+  servlet:
+    multipart:
+      max-file-size: 10MB
+      max-request-size: 10MB
+
+pigeon:
+  auth:
+    enabled: true
+  storage:
+    type: LOCAL # LOCAL | S3
+    temp-dir: /tmp/pigeon-pod
+    s3:
+      endpoint:
+      region: us-east-1
+      bucket:
+      access-key:
+      secret-key:
+      path-style-access: true
+      connect-timeout-seconds: 30
+      socket-timeout-seconds: 1800
+      read-timeout-seconds: 1800
+      presign-expire-hours: 72
+  audio-file-path: /data/audio/ # set to your audio file path when developing locally
+  video-file-path: /data/video/ # set to your video file path when developing locally
+  cover-file-path: /data/cover/ # set to your cover file path when developing locally
+  ssl-file-path: /data/ssl/
+  yt-dlp:
+    managed-root: /data/tools/yt-dlp
+    keep-versions: 3
+    update-timeout-seconds: 300
+  download:
+    process-timeout-minutes: 60
+
+sa-token:
+  # Token name (also the cookie name)
+  token-name: pigeonpod
+  # Token validity period (seconds), default is 30 days, -1 means permanent
+  timeout: 2592000
+  # Token minimum active frequency (seconds), if token is not used within this time it will be frozen, default -1 means no limit
+  active-timeout: -1
+  # Allow multiple logins for the same account at different locations (true: allow, false: new login kicks out old login)
+  is-concurrent: true
+  # When multiple people log in to the same account, whether to share one token (true: share one token, false: new token for each login)
+  is-share: false
+  # Token style (default values: uuid, simple-uuid, random-32, random-64, random-128, tik)
+  token-style: uuid
+  # Output operation log
+  is-log: true
+
+logging:
+  file:
+    name: ${PIGEON_LOG_FILE:}
+  pattern:
+    file: "%d{yyyy-MM-dd HH:mm:ss.SSS} %-5level [%thread] %logger{36} - %msg%n"
+  logback:
+    rollingpolicy:
+      file-name-pattern: ${PIGEON_LOG_FILE_PATTERN:${PIGEON_LOG_FILE:}.%d{yyyy-MM-dd}.%i.gz}
+      max-file-size: ${PIGEON_LOG_MAX_FILE_SIZE:100MB}
+      max-history: ${PIGEON_LOG_MAX_HISTORY:14}
+      total-size-cap: ${PIGEON_LOG_TOTAL_SIZE_CAP:2GB}
+      clean-history-on-start: ${PIGEON_LOG_CLEAN_HISTORY_ON_START:false}
+  level:
+    org.springframework: warn
+    top.asimov.pigeon: info
+    cn.dev33.satoken: info

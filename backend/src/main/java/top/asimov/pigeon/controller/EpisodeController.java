@@ -1,0 +1,109 @@
+package top.asimov.pigeon.controller;
+
+import cn.dev33.satoken.annotation.SaCheckLogin;
+import cn.dev33.satoken.annotation.SaCheckRole;
+import cn.dev33.satoken.util.SaResult;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import jakarta.servlet.ServletException;
+import jakarta.servlet.http.HttpServletRequest;
+import jakarta.servlet.http.HttpServletResponse;
+import java.io.IOException;
+import java.util.List;
+import org.springframework.web.bind.annotation.DeleteMapping;
+import org.springframework.web.bind.annotation.GetMapping;
+import org.springframework.web.bind.annotation.PathVariable;
+import org.springframework.web.bind.annotation.PostMapping;
+import org.springframework.web.bind.annotation.RequestBody;
+import org.springframework.web.bind.annotation.RequestMapping;
+import org.springframework.web.bind.annotation.RequestParam;
+import org.springframework.web.bind.annotation.RestController;
+import top.asimov.pigeon.model.entity.Episode;
+import top.asimov.pigeon.model.request.EpisodeBatchRequest;
+import top.asimov.pigeon.service.EpisodeService;
+import top.asimov.pigeon.service.MediaService;
+import top.asimov.pigeon.service.PublicEpisodeService;
+
+@SaCheckLogin
+@RestController
+@RequestMapping("/api/episode")
+public class EpisodeController {
+
+  private final EpisodeService episodeService;
+  private final MediaService mediaService;
+  private final PublicEpisodeService publicEpisodeService;
+
+  public EpisodeController(EpisodeService episodeService, MediaService mediaService,
+      PublicEpisodeService publicEpisodeService) {
+    this.episodeService = episodeService;
+    this.mediaService = mediaService;
+    this.publicEpisodeService = publicEpisodeService;
+  }
+
+  @GetMapping("/list/{feedId}")
+  public SaResult episodes(@PathVariable String feedId,
+      @RequestParam(defaultValue = "1") Integer page,
+      @RequestParam(defaultValue = "25") Integer size,
+      @RequestParam(required = false) String search,
+      @RequestParam(defaultValue = "default") String sort,
+      @RequestParam(defaultValue = "all") String filter) {
+    Page<Episode> episodeList = episodeService.episodePage(feedId, new Page<>(page, size),
+        search, sort, filter);
+    return SaResult.data(episodeList);
+  }
+
+  @SaCheckRole("admin")
+  @DeleteMapping("/{id}")
+  public SaResult deleteEpisode(@PathVariable String id) {
+    return SaResult.data(episodeService.deleteEpisodeById(id));
+  }
+
+  @SaCheckRole("admin")
+  @PostMapping("/retry/{id}")
+  public SaResult retryEpisode(@PathVariable String id) {
+    episodeService.retryEpisode(id);
+    return SaResult.ok();
+  }
+
+  @SaCheckRole("admin")
+  @PostMapping("/download/{id}")
+  public SaResult manualDownloadEpisode(@PathVariable String id) {
+    episodeService.manualDownloadEpisode(id);
+    return SaResult.ok();
+  }
+
+  @SaCheckRole("admin")
+  @PostMapping("/cancel/{id}")
+  public SaResult cancelEpisode(@PathVariable String id) {
+    episodeService.cancelPendingEpisode(id);
+    return SaResult.ok();
+  }
+
+  @PostMapping("/status")
+  public SaResult getEpisodeStatusByIds(@RequestBody List<String> episodeIds) {
+    List<Episode> episodes = episodeService.getEpisodeStatusByIds(episodeIds);
+    return SaResult.data(episodes);
+  }
+
+  @SaCheckRole("admin")
+  @PostMapping("/batch")
+  public SaResult batchEpisodes(@RequestBody EpisodeBatchRequest request) {
+    episodeService.batchProcessEpisodes(request.getAction(), request.getStatus(),
+        request.getEpisodeIds());
+    return SaResult.ok();
+  }
+
+  /**
+   * 浏览器“下载到本地”用：只返回节目对应的媒体文件（音频/视频），不包含字幕/封面。
+   */
+  @GetMapping("/download/local/{id}")
+  public void downloadEpisodeToLocal(@PathVariable String id, HttpServletRequest request,
+      HttpServletResponse response) throws ServletException, IOException {
+    mediaService.serveEpisodeDownloadToLocal(id, request, response);
+  }
+
+  @GetMapping("/share/{id}")
+  public SaResult getEpisodeShareUrl(@PathVariable String id) {
+    return SaResult.data(publicEpisodeService.generateShareUrl(id));
+  }
+
+}

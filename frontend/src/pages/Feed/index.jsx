@@ -1,0 +1,1599 @@
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { useParams, useNavigate } from 'react-router-dom';
+import { useDisclosure, useMediaQuery } from '@mantine/hooks';
+import {
+  Container,
+  Title,
+  Text,
+  Image,
+  Button,
+  Group,
+  Card,
+  Center,
+  Stack,
+  Badge,
+  Box,
+  Modal,
+  Loader,
+  AspectRatio,
+  TextInput,
+  Tooltip,
+  Popover,
+  FileInput,
+  Select,
+  Grid,
+  NumberInput,
+  Flex,
+  Checkbox,
+  Table,
+  Pagination,
+  ScrollArea,
+  ActionIcon,
+} from '@mantine/core';
+import {
+  IconBrandApplePodcast,
+  IconBackspace,
+  IconRotate,
+  IconDownload,
+  IconCircleX,
+  IconBrandYoutubeFilled,
+  IconSettings,
+  IconVideo,
+  IconHeadphones,
+  IconSearch,
+  IconShare3,
+} from '@tabler/icons-react';
+import {
+  API,
+  formatDateWithPattern,
+  formatISODuration,
+  showError,
+  showSuccess,
+  copyToClipboard,
+} from '../../helpers/index.js';
+import { useTranslation } from 'react-i18next';
+import { usePlayer } from '../../context/PlayerContext';
+import { useDateFormat } from '../../hooks/useDateFormat.js';
+import CopyModal from '../../components/CopyModal';
+import EditFeedModal from '../../components/EditFeedModal';
+import FeedHeader from '../../components/FeedHeader';
+import { UserContext } from '../../context/User/UserContext.jsx';
+
+// 需要自动轮询的节目状态常量（移到组件外部避免重复创建）
+const ACTIVE_STATUSES = ['PENDING', 'DOWNLOADING'];
+const BATCH_PAGE_SIZE = 15;
+
+// 下载状态对应的多语言文案 key
+const DOWNLOAD_STATUS_LABEL_KEYS = {
+  READY: 'episode_status_ready',
+  PENDING: 'episode_status_pending',
+  DOWNLOADING: 'episode_status_downloading',
+  COMPLETED: 'episode_status_completed',
+  FAILED: 'episode_status_failed',
+};
+
+const FeedDetail = () => {
+  const { t } = useTranslation();
+  const contextValue = React.useContext(UserContext);
+  const userState = Array.isArray(contextValue) ? contextValue[0] : (contextValue?.state || contextValue);
+  const isAdmin = userState?.user?.role === 'admin';
+  const dateFormat = useDateFormat();
+  const isSmallScreen = useMediaQuery('(max-width: 36em)');
+  const { type, feedId } = useParams();
+  const navigate = useNavigate();
+  const [feed, setFeed] = useState(null);
+  const [episodes, setEpisodes] = useState([]);
+  const [currentPage, setCurrentPage] = useState(1);
+  const [hasMoreEpisodes, setHasMoreEpisodes] = useState(true);
+  const [loadingEpisodes, setLoadingEpisodes] = useState(false);
+  const observerRef = useRef();
+  const loadingRef = useRef(false); // Use ref to track loading state without causing re-renders
+  const episodeRequestIdRef = useRef(0);
+  const [confirmDeleteFeedOpened, { open: openConfirmDeleteFeed, close: closeConfirmDeleteFeed }] =
+    useDisclosure(false);
+  const [deleting, setDeleting] = useState(false);
+  const [editConfigOpened, { open: openEditConfig, close: closeEditConfig }] = useDisclosure(false);
+  const [copyModalOpened, { open: openCopyModal, close: closeCopyModal }] = useDisclosure(false);
+  const [copyText, setCopyText] = useState('');
+  const [
+    customizeFeedModalOpened,
+    { open: openCustomizeFeedModal, close: closeCustomizeFeedModal },
+  ] = useDisclosure(false);
+  const [editingTitle, setEditingTitle] = useState('');
+  const [customCoverFile, setCustomCoverFile] = useState(null);
+  const [refreshTimer, setRefreshTimer] = useState(null);
+  const [refreshing, setRefreshing] = useState(false);
+  const [loadingHistory, setLoadingHistory] = useState(false);
+  const [openedErrorPopoverEpisodeId, setOpenedErrorPopoverEpisodeId] = useState(null);
+  const [
+    batchDownloadModalOpened,
+    { open: openBatchDownloadModal, close: closeBatchDownloadModal },
+  ] = useDisclosure(false);
+  const [batchEpisodes, setBatchEpisodes] = useState([]);
+  const [batchCurrentPage, setBatchCurrentPage] = useState(1);
+  const [batchTotalPages, setBatchTotalPages] = useState(1);
+  const [batchTotalCount, setBatchTotalCount] = useState(0);
+  const [batchLoadingEpisodes, setBatchLoadingEpisodes] = useState(false);
+  const [batchSubmitting, setBatchSubmitting] = useState(false);
+  const [batchLoadingHistory, setBatchLoadingHistory] = useState(false);
+  const [selectedBatchEpisodeIds, setSelectedBatchEpisodeIds] = useState([]);
+  const [batchSearchInput, setBatchSearchInput] = useState('');
+  const [batchSearchQuery, setBatchSearchQuery] = useState('');
+  const [searchInput, setSearchInput] = useState('');
+  const [searchQuery, setSearchQuery] = useState('');
+  const [sortOrder, setSortOrder] = useState('default');
+  const [filterStatus, setFilterStatus] = useState('all');
+
+  // Intersection Observer callback for infinite scrolling
+  const lastEpisodeElementRef = useCallback(
+    (node) => {
+      if (loadingRef.current) return;
+      if (observerRef.current) observerRef.current.disconnect();
+      observerRef.current = new IntersectionObserver(
+        (entries) => {
+          if (entries[0].isIntersecting && hasMoreEpisodes && !loadingRef.current) {
+            setCurrentPage((prevPage) => prevPage + 1);
+          }
+        },
+        { threshold: 0.1 },
+      );
+      if (node) observerRef.current.observe(node);
+    },
+    [hasMoreEpisodes],
+  );
+
+  const fetchFeedDetail = useCallback(async () => {
+    const res = await API.get(`/api/feed/${type}/detail/${feedId}`);
+    const { code, msg, data } = res.data;
+    if (code !== 200) {
+      showError(msg);
+    } else {
+      setFeed(data);
+    }
+  }, [feedId, type]);
+
+  const fetchEpisodes = useCallback(
+    async (page = 1, options = {}) => {
+      const { isInitialLoad = false, force = false } = options;
+
+      // Prevent duplicate requests using ref
+      if (loadingRef.current && !force) return;
+
+      const requestId = ++episodeRequestIdRef.current;
+      loadingRef.current = true;
+      setLoadingEpisodes(true);
+
+      try {
+        const params = new URLSearchParams({
+          page: String(page),
+          size: '25',
+          sort: sortOrder,
+          filter: filterStatus,
+        });
+        if (searchQuery.trim()) {
+          params.set('search', searchQuery.trim());
+        }
+        const res = await API.get(`/api/episode/list/${feedId}?${params.toString()}`);
+        const { code, msg, data } = res.data;
+
+        if (code !== 200) {
+          showError(msg);
+          return;
+        }
+
+        if (requestId !== episodeRequestIdRef.current) {
+          return;
+        }
+
+        // MyBatis Plus Page object has 'records' for data and 'pages' for total pages
+        const episodes = data.records || [];
+        const totalPages = data.pages || 0;
+
+        if (isInitialLoad) {
+          setEpisodes(episodes);
+          setCurrentPage(1);
+        } else {
+          setEpisodes((prevEpisodes) => [...prevEpisodes, ...episodes]);
+        }
+
+        // Check if there are more episodes to load
+        setHasMoreEpisodes(page < totalPages);
+      } catch (error) {
+        showError('Failed to load episodes');
+        console.error('Fetch episodes error:', error);
+      } finally {
+        if (requestId === episodeRequestIdRef.current) {
+          loadingRef.current = false;
+          setLoadingEpisodes(false);
+        }
+      }
+    },
+    [feedId, filterStatus, searchQuery, sortOrder], // Remove loadingEpisodes dependency
+  );
+
+  const reloadEpisodes = useCallback(async () => {
+    setHasMoreEpisodes(true);
+    setCurrentPage(1);
+    await fetchEpisodes(1, { isInitialLoad: true, force: true });
+  }, [fetchEpisodes]);
+
+  const reloadFeedAndEpisodes = useCallback(async () => {
+    await fetchFeedDetail();
+    await reloadEpisodes();
+  }, [fetchFeedDetail, reloadEpisodes]);
+
+  useEffect(() => {
+    fetchFeedDetail();
+  }, [fetchFeedDetail]);
+
+  useEffect(() => {
+    setHasMoreEpisodes(true);
+    setCurrentPage(1);
+    fetchEpisodes(1, { isInitialLoad: true, force: true }); // Initial load or filter change
+  }, [fetchEpisodes]);
+
+  useEffect(() => {
+    if (currentPage > 1) {
+      fetchEpisodes(currentPage); // Load more episodes
+    }
+  }, [currentPage, fetchEpisodes]);
+
+  // 组件卸载时清理定时器
+  useEffect(() => {
+    return () => {
+      if (refreshTimer) {
+        clearInterval(refreshTimer);
+      }
+    };
+  }, [refreshTimer]);
+
+  // Update feed config
+  const updateFeedConfig = async () => {
+    const res = await API.put(`/api/feed/${type}/config/${feedId}`, feed);
+    const { code, msg, data } = res.data;
+
+    if (code !== 200) {
+      showError(msg || t('update_channel_config_failed'));
+      return;
+    }
+
+    if (data.downloadHistory) {
+      showSuccess(t('channel_config_updated_and_add_history_episodes_task_submitted'));
+    } else {
+      showSuccess(t('channel_config_updated'));
+    }
+
+    await reloadFeedAndEpisodes();
+
+    if (batchDownloadModalOpened) {
+      setBatchCurrentPage(1);
+      await fetchBatchEpisodes(1);
+    }
+
+    closeEditConfig();
+  };
+
+  const handleUpdateCustomFeed = async () => {
+    if (customCoverFile) {
+      const formData = new FormData();
+      formData.append('file', customCoverFile);
+
+      try {
+        const uploadRes = await API.post(`/api/feed/${type}/${feedId}/cover`, formData, {
+          headers: {
+            'Content-Type': 'multipart/form-data',
+          },
+        });
+
+        if (uploadRes.data.code !== 200) {
+          showError(uploadRes.data.msg || 'Failed to upload cover image');
+          return; // Stop if cover upload fails
+        }
+      } catch (error) {
+        showError('Failed to upload cover image');
+        console.error(error);
+        return; // Stop if cover upload fails
+      }
+    }
+
+    // Now update the title
+    const res = await API.put(`/api/feed/${type}/config/${feedId}`, {
+      ...feed,
+      customTitle: editingTitle,
+    });
+
+    const { code, msg } = res.data;
+
+    if (code !== 200) {
+      showError(msg || t('update_feed_failed'));
+      return;
+    }
+
+    showSuccess(t('update_feed_success'));
+    await fetchFeedDetail(); // Refetch to get all updated data
+    closeCustomizeFeedModal();
+    setCustomCoverFile(null);
+  };
+
+  const handleClearCustomCover = async () => {
+    try {
+      const res = await API.delete(`/api/feed/${type}/${feedId}/cover`);
+      if (res.data.code !== 200) {
+        showError(res.data.msg || 'Failed to clear custom cover');
+        return;
+      }
+      showSuccess('Custom cover cleared successfully');
+      await fetchFeedDetail(); // Refetch to get all updated data
+      closeCustomizeFeedModal();
+      setCustomCoverFile(null);
+    } catch (error) {
+      showError('Failed to clear custom cover');
+      console.error(error);
+    }
+  };
+
+  const deleteFeed = async () => {
+    setDeleting(true);
+    const response = await API.delete(`/api/feed/${type}/delete/${feedId}`);
+    const { code, msg } = response.data;
+
+    if (code !== 200) {
+      showError(msg || t('delete_channel_failed'));
+      setDeleting(false);
+      return;
+    }
+
+    showSuccess(t('channel_deleted_success'));
+    setDeleting(false);
+
+    // Navigate back to the feeds list page
+    navigate('/');
+  };
+
+  const handleSubscribe = async () => {
+    if (!feed) {
+      return;
+    }
+    try {
+      const response = await API.get(`/api/feed/${type}/subscribe/${feed.id}`);
+      const { code, msg, data } = response.data;
+
+      if (code !== 200) {
+        showError(msg || t('failed_to_generate_subscription_url'));
+        return;
+      }
+
+      // 使用自定义复制功能
+      await copyToClipboard(
+        data,
+        () => {
+          // 复制成功回调
+          showSuccess(t('subscription_link_generated_success'));
+        },
+        (text) => {
+          // 需要手动复制时的回调
+          setCopyText(text);
+          openCopyModal();
+        },
+      );
+    } catch (error) {
+      showError(t('failed_to_generate_subscription_url'));
+      console.error('Subscribe error:', error);
+    }
+  };
+
+  const handleRefresh = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const res = await API.post(`/api/feed/${type}/refresh/${feedId}`);
+      const { code, data, msg } = res.data;
+      if (code !== 200) {
+        showError(msg || t('feed_refresh_failed'));
+        return;
+      }
+      showSuccess(data.message || t('feed_refresh_success'));
+      await reloadFeedAndEpisodes();
+    } catch (error) {
+      showError(t('feed_refresh_failed'));
+      console.error('Refresh feed error:', error);
+    } finally {
+      setRefreshing(false);
+    }
+  }, [feedId, reloadFeedAndEpisodes, t, type]);
+
+  const handleFetchHistory = useCallback(async () => {
+    if (loadingHistory) {
+      return;
+    }
+    setLoadingHistory(true);
+    try {
+      const res = await API.post(`/api/feed/${type}/history/${feedId}`);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg || t('fetch_history_episodes_failed'));
+        return;
+      }
+      if (Array.isArray(data) && data.length > 0) {
+        showSuccess(t('fetch_history_episodes_success', { count: data.length }));
+        await reloadEpisodes();
+      } else {
+        showSuccess(t('fetch_history_episodes_empty'));
+      }
+    } catch (error) {
+      console.error('Fetch history episodes error:', error);
+      showError(t('fetch_history_episodes_failed'));
+    } finally {
+      setLoadingHistory(false);
+    }
+  }, [feedId, loadingHistory, reloadEpisodes, t, type]);
+
+  const fetchBatchEpisodes = useCallback(
+    async (page = 1) => {
+      setBatchLoadingEpisodes(true);
+      try {
+        const params = new URLSearchParams({
+          page: String(page),
+          size: String(BATCH_PAGE_SIZE),
+          sort: 'newest',
+          filter: 'ready',
+        });
+        if (batchSearchQuery.trim()) {
+          params.set('search', batchSearchQuery.trim());
+        }
+        const res = await API.get(`/api/episode/list/${feedId}?${params.toString()}`);
+        const { code, msg, data } = res.data;
+
+        if (code !== 200) {
+          showError(
+            msg || t('failed_to_load_episodes', { defaultValue: 'Failed to load episodes' }),
+          );
+          return;
+        }
+
+        const records = data.records || [];
+        setBatchEpisodes(records);
+        setBatchCurrentPage(data.current || page);
+        setBatchTotalPages(data.pages || 1);
+        setBatchTotalCount(typeof data.total === 'number' ? data.total : records.length);
+      } catch (error) {
+        console.error('Fetch batch episodes error:', error);
+        showError(t('failed_to_load_episodes', { defaultValue: 'Failed to load episodes' }));
+      } finally {
+        setBatchLoadingEpisodes(false);
+      }
+    },
+    [batchSearchQuery, feedId, t],
+  );
+
+  const handleOpenBatchDownloadModal = () => {
+    setSelectedBatchEpisodeIds([]);
+    setBatchSearchInput('');
+    setBatchSearchQuery('');
+    setBatchCurrentPage(1);
+    openBatchDownloadModal();
+  };
+
+  const handleBatchModalClose = () => {
+    if (batchSubmitting) {
+      return;
+    }
+    closeBatchDownloadModal();
+  };
+
+  useEffect(() => {
+    if (!batchDownloadModalOpened) {
+      return;
+    }
+    fetchBatchEpisodes(batchCurrentPage);
+  }, [batchCurrentPage, batchDownloadModalOpened, fetchBatchEpisodes]);
+
+  useEffect(() => {
+    if (!batchDownloadModalOpened) {
+      return;
+    }
+    setBatchCurrentPage(1);
+  }, [batchDownloadModalOpened, batchSearchQuery]);
+
+  const handleToggleBatchEpisode = (episodeId, checked) => {
+    setSelectedBatchEpisodeIds((prevIds) => {
+      if (checked) {
+        return prevIds.includes(episodeId) ? prevIds : [...prevIds, episodeId];
+      }
+      return prevIds.filter((id) => id !== episodeId);
+    });
+  };
+
+  const handleToggleBatchCurrentPage = (checked) => {
+    const currentPageIds = batchEpisodes.map((episode) => episode.id);
+    setSelectedBatchEpisodeIds((prevIds) => {
+      const selectedSet = new Set(prevIds);
+      if (checked) {
+        currentPageIds.forEach((id) => selectedSet.add(id));
+      } else {
+        currentPageIds.forEach((id) => selectedSet.delete(id));
+      }
+      return Array.from(selectedSet);
+    });
+  };
+
+  const handleBatchDownloadSubmit = async () => {
+    if (selectedBatchEpisodeIds.length === 0) {
+      return;
+    }
+
+    setBatchSubmitting(true);
+    try {
+      await API.post('/api/episode/batch', {
+        action: 'DOWNLOAD',
+        episodeIds: selectedBatchEpisodeIds,
+      });
+      showSuccess(
+        t('batch_download_submitted', {
+          count: selectedBatchEpisodeIds.length,
+          defaultValue: 'Download submitted for {{count}} episodes',
+        }),
+      );
+
+      const selectedIdSet = new Set(selectedBatchEpisodeIds);
+      setEpisodes((prevEpisodes) =>
+        prevEpisodes.map((episode) =>
+          selectedIdSet.has(episode.id)
+            ? { ...episode, downloadStatus: 'PENDING', errorLog: null }
+            : episode,
+        ),
+      );
+
+      setSelectedBatchEpisodeIds([]);
+      closeBatchDownloadModal();
+      fetchBatchEpisodes(batchCurrentPage);
+    } catch (error) {
+      console.error('Batch download submit failed:', error);
+      showError(t('batch_download_failed', { defaultValue: 'Batch download failed' }));
+    } finally {
+      setBatchSubmitting(false);
+    }
+  };
+
+  const handleFetchHistoryForBatch = async () => {
+    if (batchLoadingHistory) {
+      return;
+    }
+    setBatchLoadingHistory(true);
+    try {
+      const res = await API.post(`/api/feed/${type}/history/${feedId}`);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg || t('fetch_history_episodes_failed'));
+        return;
+      }
+      if (Array.isArray(data) && data.length > 0) {
+        showSuccess(t('fetch_history_episodes_success', { count: data.length }));
+        await reloadEpisodes();
+        await fetchBatchEpisodes(batchCurrentPage);
+      } else {
+        showSuccess(t('fetch_history_episodes_empty'));
+      }
+    } catch (error) {
+      console.error('Fetch history episodes for batch modal error:', error);
+      showError(t('fetch_history_episodes_failed'));
+    } finally {
+      setBatchLoadingHistory(false);
+    }
+  };
+
+  const handleEditAppearance = () => {
+    if (!feed) {
+      return;
+    }
+    setEditingTitle(feed.customTitle || '');
+    openCustomizeFeedModal();
+  };
+
+  const getDownloadStatusColor = (status) => {
+    switch (status) {
+      case 'READY':
+        return 'gray';
+      case 'COMPLETED':
+        return 'green';
+      case 'DOWNLOADING':
+        return 'blue';
+      case 'PENDING':
+        return 'yellow';
+      case 'FAILED':
+        return 'red';
+      default:
+        return 'gray';
+    }
+  };
+
+  // 检查是否有需要跟踪状态变化的节目（PENDING, DOWNLOADING）
+  const hasActiveEpisodes = useCallback(() => {
+    return episodes.some((episode) => ACTIVE_STATUSES.includes(episode.downloadStatus));
+  }, [episodes]);
+
+  // 刷新活跃状态节目的状态（PENDING, DOWNLOADING）
+  const refreshActiveEpisodes = useCallback(async () => {
+    if (!hasActiveEpisodes()) return;
+
+    try {
+      // 获取当前活跃状态的节目ID列表
+      const activeIds = episodes
+        .filter((episode) => ACTIVE_STATUSES.includes(episode.downloadStatus))
+        .map((episode) => episode.id);
+
+      if (activeIds.length === 0) return;
+
+      // 使用专门的API端点获取特定节目的状态
+      const res = await API.post('/api/episode/status', activeIds);
+      const { code, data } = res.data;
+
+      if (code !== 200) {
+        console.error('Failed to fetch episode status');
+        return;
+      }
+
+      // 更新对应节目的状态，保持分页不变，只更新状态相关字段
+      setEpisodes((prevEpisodes) =>
+        prevEpisodes.map((episode) => {
+          const updatedEpisode = data.find((updated) => updated.id === episode.id);
+          if (updatedEpisode) {
+            // 只更新状态相关的字段，保持其他字段不变
+            return {
+              ...episode,
+              downloadStatus: updatedEpisode.downloadStatus,
+              errorLog: updatedEpisode.errorLog,
+              mediaType: updatedEpisode.mediaType,
+            };
+          }
+          return episode;
+        }),
+      );
+    } catch (error) {
+      console.error('Failed to refresh active episodes:', error);
+    }
+  }, [episodes, hasActiveEpisodes]);
+
+  // 自动刷新活跃状态节目的状态（PENDING, DOWNLOADING）
+  useEffect(() => {
+    let timer = null;
+
+    // 如果有活跃状态的节目，设置3秒定时器
+    if (hasActiveEpisodes()) {
+      timer = setInterval(() => {
+        refreshActiveEpisodes();
+      }, 3000);
+
+      setRefreshTimer(timer);
+    } else {
+      setRefreshTimer(null);
+    }
+
+    // 清理函数
+    return () => {
+      if (timer) {
+        clearInterval(timer);
+      }
+    };
+  }, [hasActiveEpisodes, refreshActiveEpisodes]);
+
+  const { play } = usePlayer();
+
+  const buildEpisodeSourceUrl = (episodeId) => {
+    if (!episodeId) return '';
+    return `https://www.youtube.com/watch?v=${episodeId}`;
+  };
+
+  const handlePlay = (episode) => {
+    if (episode.downloadStatus !== 'COMPLETED') return;
+    play(episode, feed);
+  };
+
+  const deleteEpisode = async (episodeId) => {
+    const response = await API.delete(`/api/episode/${episodeId}`);
+    const { code, msg } = response.data;
+
+    if (code !== 200) {
+      showError(msg || t('delete_episode_failed'));
+      return;
+    }
+
+    showSuccess(t('episode_deleted_success'));
+    setEpisodes((prevEpisodes) =>
+      prevEpisodes.map((episode) =>
+        episode.id === episodeId
+          ? { ...episode, downloadStatus: 'READY', errorLog: null }
+          : episode,
+      ),
+    );
+  };
+
+  const retryEpisode = async (episodeId) => {
+    const response = await API.post(`/api/episode/retry/${episodeId}`);
+    const { code, msg } = response.data;
+
+    if (code !== 200) {
+      showError(msg || t('retry_failed'));
+      return;
+    }
+    showSuccess(t('retry_submitted'));
+    // 乐观更新：将状态标记为排队中，交给轮询流程同步后续状态
+    setEpisodes((prevEpisodes) =>
+      prevEpisodes.map((episode) =>
+        episode.id === episodeId
+          ? { ...episode, downloadStatus: 'PENDING', errorLog: null }
+          : episode,
+      ),
+    );
+  };
+
+  const cancelEpisode = async (episodeId) => {
+    try {
+      await API.post(`/api/episode/cancel/${episodeId}`);
+      showSuccess(
+        t('episode_cancelled_successfully', {
+          defaultValue: 'Pending episode cancelled',
+        }),
+      );
+      // 取消后保留节目卡片，仅将状态重置为 READY
+      setEpisodes((prevEpisodes) =>
+        prevEpisodes.map((episode) =>
+          episode.id === episodeId
+            ? { ...episode, downloadStatus: 'READY', errorLog: null }
+            : episode,
+        ),
+      );
+    } catch (error) {
+      console.error('Failed to cancel episode:', error);
+      showError(t('cancel_failed', { defaultValue: 'Failed to cancel episode' }));
+    }
+  };
+
+  const downloadEpisode = async (episodeId) => {
+    const response = await API.post(`/api/episode/download/${episodeId}`);
+    const { code, msg } = response.data;
+
+    if (code !== 200) {
+      showError(msg || t('download_failed'));
+      return;
+    }
+    showSuccess(t('download_submitted'));
+    // 乐观更新本地状态：标记为排队中，交给轮询同步后续状态
+    setEpisodes((prevEpisodes) =>
+      prevEpisodes.map((episode) =>
+        episode.id === episodeId
+          ? { ...episode, downloadStatus: 'PENDING', errorLog: null }
+          : episode,
+      ),
+    );
+  };
+
+  const downloadEpisodeToLocal = (episodeId) => {
+    const baseURL = API.defaults.baseURL || '';
+    const url = `${baseURL}/api/episode/download/local/${encodeURIComponent(episodeId)}`;
+    const link = document.createElement('a');
+    link.href = url;
+    link.download = '';
+    link.style.display = 'none';
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+  };
+
+  const shareEpisode = async (episode) => {
+    if (!episode?.id) return;
+
+    try {
+      const response = await API.get(`/api/episode/share/${encodeURIComponent(episode.id)}`);
+      const { code, msg, data } = response.data;
+
+      if (code !== 200 || !data) {
+        showError(msg || t('share_episode_failed', { defaultValue: 'Failed to share episode' }));
+        return;
+      }
+
+      const shareUrl = data;
+      const shareTitle = episode.title || t('share_episode', { defaultValue: 'Share' });
+      const canUseNativeShare =
+        typeof navigator !== 'undefined' &&
+        typeof navigator.share === 'function' &&
+        window.isSecureContext;
+      const shouldUseNativeShare =
+        canUseNativeShare &&
+        (isSmallScreen ||
+          (typeof window !== 'undefined' &&
+            typeof window.matchMedia === 'function' &&
+            window.matchMedia('(pointer: coarse)').matches));
+
+      if (shouldUseNativeShare) {
+        try {
+          await navigator.share({
+            title: shareTitle,
+            text: shareTitle,
+            url: shareUrl,
+          });
+          return;
+        } catch (error) {
+          if (error?.name === 'AbortError') {
+            return;
+          }
+          console.warn('Native share failed, falling back to copy:', error);
+        }
+      }
+
+      await copyToClipboard(
+        shareUrl,
+        () => {
+          showSuccess(
+            t('share_episode_copied', { defaultValue: 'Share link copied to clipboard' }),
+          );
+        },
+        (text) => {
+          setCopyText(text);
+          openCopyModal();
+        },
+      );
+    } catch (error) {
+      console.error('Share episode failed:', error);
+      showError(t('share_episode_failed', { defaultValue: 'Failed to share episode' }));
+    }
+  };
+
+  const actionSection = isSmallScreen ? (
+    <Stack gap="xs" w="100%">
+      <Flex gap="xs" align="center" wrap="nowrap" w="100%">
+        <TextInput
+          size="xs"
+          placeholder={t('search', { defaultValue: 'Search' })}
+          value={searchInput}
+          onChange={(event) => setSearchInput(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              setSearchQuery(searchInput.trim());
+            }
+          }}
+          leftSection={<IconSearch size={16} />}
+          style={{ flex: '1 1 0', minWidth: 0 }}
+        />
+        <Select
+          size="xs"
+          value={sortOrder}
+          onChange={(value) => setSortOrder(value || 'newest')}
+          data={[
+            { value: 'newest', label: t('newest', { defaultValue: 'Newest' }) },
+            { value: 'oldest', label: t('oldest', { defaultValue: 'Oldest' }) },
+          ]}
+          allowDeselect={false}
+          w={90}
+          style={{ flexShrink: 0 }}
+        />
+        <Select
+          size="xs"
+          value={filterStatus}
+          onChange={(value) => setFilterStatus(value || 'all')}
+          data={[
+            { value: 'all', label: t('all', { defaultValue: 'All' }) },
+            { value: 'downloaded', label: t('downloaded', { defaultValue: 'Downloaded' }) },
+          ]}
+          allowDeselect={false}
+          w={100}
+          style={{ flexShrink: 0 }}
+        />
+      </Flex>
+    </Stack>
+  ) : (
+    <Group gap="sm" wrap="wrap" justify="flex-end">
+      <Group gap="xs" wrap="wrap">
+        <TextInput
+          size="xs"
+          w={220}
+          placeholder={t('search', { defaultValue: 'Search' })}
+          value={searchInput}
+          onChange={(event) => setSearchInput(event.currentTarget.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Enter') {
+              setSearchQuery(searchInput.trim());
+            }
+          }}
+          leftSection={<IconSearch size={16} />}
+        />
+      </Group>
+      <Select
+        size="xs"
+        value={sortOrder}
+        onChange={(value) => setSortOrder(value || 'default')}
+        data={[
+          { value: 'default', label: t('default', { defaultValue: 'Default' }) },
+          { value: 'newest', label: t('newest', { defaultValue: 'Newest' }) },
+          { value: 'oldest', label: t('oldest', { defaultValue: 'Oldest' }) },
+        ]}
+        allowDeselect={false}
+        w={100}
+      />
+      <Select
+        size="xs"
+        value={filterStatus}
+        onChange={(value) => setFilterStatus(value || 'all')}
+        data={[
+          { value: 'all', label: t('all', { defaultValue: 'All' }) },
+          { value: 'downloaded', label: t('downloaded', { defaultValue: 'Downloaded' }) },
+        ]}
+        allowDeselect={false}
+        w={125}
+      />
+    </Group>
+  );
+
+  const isPlaylist = feed?.type && String(feed.type).toLowerCase() === 'playlist';
+  const isSingleVideoPlaylist =
+    isPlaylist && String(feed?.feedMode || '').toUpperCase() === 'SINGLE_VIDEO';
+  const normalizedFeedSource = String(feed?.source || 'YOUTUBE').toUpperCase();
+  const isYoutubePlaylist = isPlaylist && normalizedFeedSource === 'YOUTUBE';
+  const historyButtonColor = '#ff0034';
+  const historyButtonLabel = t('fetch_history_episodes', {
+    defaultValue: 'Load more episodes from Youtube',
+  });
+  const historyButtonIcon = <IconBrandYoutubeFilled size={18} />;
+  const historyActionIcon = <IconBrandYoutubeFilled size={16} />;
+  const headerActions = [
+    {
+      key: 'subscribe',
+      label: t('subscribe'),
+      leftSection: <IconBrandApplePodcast size={16} />,
+      sizeMobile: 'compact-xs',
+      onClick: handleSubscribe,
+    },
+    isAdmin && {
+      key: 'config',
+      label: t('config'),
+      color: 'orange',
+      leftSection: <IconSettings size={16} />,
+      sizeMobile: 'compact-xs',
+      onClick: openEditConfig,
+    },
+    isAdmin &&
+      !isSingleVideoPlaylist && {
+        key: 'batch-download',
+        label: t('batch_download', { defaultValue: 'Batch download' }),
+        color: 'teal',
+        leftSection: <IconDownload size={16} />,
+        sizeMobile: 'compact-xs',
+        onClick: handleOpenBatchDownloadModal,
+      },
+  ].filter(Boolean);
+  const currentBatchPageEpisodeIds = batchEpisodes.map((episode) => episode.id);
+  const selectedOnCurrentBatchPageCount = currentBatchPageEpisodeIds.filter((id) =>
+    selectedBatchEpisodeIds.includes(id),
+  ).length;
+  const isBatchCurrentPageChecked =
+    currentBatchPageEpisodeIds.length > 0 &&
+    selectedOnCurrentBatchPageCount === currentBatchPageEpisodeIds.length;
+  const isBatchCurrentPageIndeterminate =
+    selectedOnCurrentBatchPageCount > 0 && !isBatchCurrentPageChecked;
+
+  if (!feed) {
+    return (
+      <Container>
+        <Center h={400}>
+          <Title order={2}>{t('loading_channel_details')}</Title>
+        </Center>
+      </Container>
+    );
+  }
+
+  return (
+    <Container size="xl" py={isSmallScreen ? 'md' : 'xl'}>
+      {/* Feed Header Section */}
+      <FeedHeader
+        feed={feed}
+        isSmallScreen={isSmallScreen}
+        onRefresh={!isAdmin || isSingleVideoPlaylist ? null : handleRefresh}
+        refreshLoading={isSingleVideoPlaylist ? false : refreshing}
+        onConfirmDelete={isAdmin ? openConfirmDeleteFeed : null}
+        onEditAppearance={isAdmin ? handleEditAppearance : null}
+        actions={headerActions}
+        footerRight={actionSection}
+      />
+
+      {/* Episodes Section */}
+      <Box>
+        {episodes.length === 0 ? (
+          <Center py="xl">
+            <Text c="dimmed">{t('no_episodes_found')}</Text>
+          </Center>
+        ) : (
+          <Stack>
+            <Stack>
+              {episodes.map((episode, index) => {
+                const statusKey =
+                  DOWNLOAD_STATUS_LABEL_KEYS[episode.downloadStatus] || episode.downloadStatus;
+                const shouldShowMediaTypeBadge =
+                  episode.downloadStatus === 'COMPLETED' && episode.mediaType;
+                const shouldShowCoverStatusBadge =
+                  episode.downloadStatus &&
+                  episode.downloadStatus !== 'COMPLETED';
+
+                return (
+                <Card
+                  key={episode.id}
+                  padding="sm"
+                  radius="md"
+                  withBorder
+                  ref={index === episodes.length - 1 ? lastEpisodeElementRef : null}
+                >
+                  <Group align="flex-start" wrap="wrap">
+                    <Box pos="relative" w={{ base: '100%', sm: 240 }} flex={{ sm: '0 0 240px' }}>
+                      <AspectRatio ratio={16 / 9}>
+                        <Image
+                          radius="md"
+                          src={episode.maxCoverUrl || episode.defaultCoverUrl}
+                          alt={episode.title}
+                          referrerPolicy="no-referrer"
+                          fit="cover"
+                        />
+                      </AspectRatio>
+                      <Box
+                        component="button"
+                        type="button"
+                        aria-label={t('play')}
+                        disabled={episode.downloadStatus !== 'COMPLETED'}
+                        onClick={() => handlePlay(episode)}
+                        style={{
+                          position: 'absolute',
+                          inset: 0,
+                          border: 'none',
+                          padding: 0,
+                          margin: 0,
+                          background: 'transparent',
+                          cursor: episode.downloadStatus === 'COMPLETED' ? 'pointer' : 'default',
+                        }}
+                      />
+
+                      {shouldShowMediaTypeBadge ? (
+                        <Box pos="absolute" top={8} right={8}>
+                          <Badge
+                            variant="filled"
+                            color={episode.mediaType?.startsWith('video') ? 'blue' : 'orange'}
+                            size="xs"
+                            radius="sm"
+                            leftSection={
+                              episode.mediaType?.startsWith('video') ? (
+                                <IconVideo size={12} />
+                              ) : (
+                                <IconHeadphones size={12} />
+                              )
+                            }
+                          >
+                            {episode.mediaType?.startsWith('video') ? 'Video' : 'Audio'}
+                          </Badge>
+                        </Box>
+                      ) : null}
+                      {shouldShowCoverStatusBadge ? (
+                        <Box pos="absolute" top={8} right={8}>
+                          {episode.downloadStatus === 'FAILED' ? (
+                            <Popover
+                              width={isSmallScreen ? '280' : '660'}
+                              position={isSmallScreen ? 'left-end' : 'right'}
+                              withArrow
+                              shadow="md"
+                              opened={openedErrorPopoverEpisodeId === episode.id}
+                              onChange={(opened) =>
+                                setOpenedErrorPopoverEpisodeId(opened ? episode.id : null)
+                              }
+                            >
+                              <Popover.Target>
+                                <Badge
+                                  color={getDownloadStatusColor(episode.downloadStatus)}
+                                  size="xs"
+                                  radius="sm"
+                                  style={{ cursor: 'pointer' }}
+                                  onClick={(event) => {
+                                    event.preventDefault();
+                                    event.stopPropagation();
+                                    setOpenedErrorPopoverEpisodeId((current) =>
+                                      current === episode.id ? null : episode.id,
+                                    );
+                                  }}
+                                >
+                                  {t(statusKey)}
+                                </Badge>
+                              </Popover.Target>
+                              <Popover.Dropdown>
+                                <Text
+                                  component="pre"
+                                  size="xs"
+                                  style={{
+                                    whiteSpace: 'pre-wrap',
+                                    wordBreak: 'break-word',
+                                    userSelect: 'text',
+                                  }}
+                                >
+                                  {episode.errorLog || t('unknown_error')}
+                                </Text>
+                              </Popover.Dropdown>
+                            </Popover>
+                          ) : (
+                            <Badge
+                              color={getDownloadStatusColor(episode.downloadStatus)}
+                              size="xs"
+                              radius="sm"
+                            >
+                              {t(statusKey)}
+                            </Badge>
+                          )}
+                        </Box>
+                      ) : null}
+                      {episode.duration ? (
+                        <Box pos="absolute" bottom={8} right={8}>
+                          <Text
+                            size="xs"
+                            fw={600}
+                            c="white"
+                            style={{
+                              backgroundColor: 'rgba(0,0,0,0.75)',
+                              borderRadius: 4,
+                              padding: '2px 6px',
+                            }}
+                          >
+                            {formatISODuration(episode.duration)}
+                          </Text>
+                        </Box>
+                      ) : null}
+                    </Box>
+
+                    <Stack gap="xs" style={{ flex: 1, minWidth: 0 }}>
+                      <Group justify="space-between">
+                        <Text
+                          component="a"
+                          href={buildEpisodeSourceUrl(episode.id)}
+                          target="_blank"
+                          rel="noopener noreferrer"
+                          fw={600}
+                          size={isSmallScreen ? 'sm' : 'md'}
+                          lineClamp={1}
+                          w="90%"
+                          title={episode.title}
+                          c="inherit"
+                          styles={{cursor: 'pointer'}}
+                        >
+                          {episode.title}
+                        </Text>
+                        <Text size="sm">
+                          {episode.publishedAt
+                            ? formatDateWithPattern(episode.publishedAt, dateFormat)
+                            : t('unknown_date')}
+                        </Text>
+                      </Group>
+
+                      <Box style={{ minHeight: isSmallScreen ? '3rem' : '4rem' }}>
+                        <Text size="sm" c="dimmed" lineClamp={isSmallScreen ? 2 : 3}>
+                          {isYoutubePlaylist && episode.sourceChannelName ? (
+                            episode.sourceChannelUrl ? (
+                              <Badge
+                                size="sm"
+                                variant="light"
+                                color="blue"
+                                component="a"
+                                href={episode.sourceChannelUrl}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                                style={{
+                                  display: 'inline-flex',
+                                  verticalAlign: 'text-bottom',
+                                  marginRight: 6,
+                                  cursor: 'pointer',
+                                }}
+                              >
+                                {episode.sourceChannelName}
+                              </Badge>
+                            ) : (
+                              <Badge
+                                size="sm"
+                                variant="light"
+                                color="blue"
+                                style={{
+                                  display: 'inline-flex',
+                                  verticalAlign: 'text-bottom',
+                                  marginRight: 6,
+                                }}
+                              >
+                                {episode.sourceChannelName}
+                              </Badge>
+                            )
+                          ) : null}
+                          {episode.description
+                            ? episode.description
+                            : t('no_description_available')}
+                        </Text>
+                      </Box>
+
+                      <Group justify="flex-end" align="center" wrap="wrap">
+                        <Group>
+                          {episode.downloadStatus === 'COMPLETED' ? (
+                            <Button
+                              size="compact-xs"
+                              color="orange"
+                              variant="outline"
+                              onClick={() => shareEpisode(episode)}
+                              leftSection={<IconShare3 size={16} />}
+                            >
+                              {t('share_episode', { defaultValue: 'Share' })}
+                            </Button>
+                          ) : null}
+                          {episode.downloadStatus === 'COMPLETED' ? (
+                            <Button
+                              size="compact-xs"
+                              color="green"
+                              variant="outline"
+                              onClick={() => downloadEpisodeToLocal(episode.id)}
+                              leftSection={<IconDownload size={16} />}
+                            >
+                              {t('save', { defaultValue: 'Save' })}
+                            </Button>
+                          ) : null}
+                          {isAdmin && episode.downloadStatus === 'READY' ? (
+                            <Button
+                              size="compact-xs"
+                              variant="outline"
+                              color="blue"
+                              onClick={() => downloadEpisode(episode.id)}
+                              leftSection={<IconDownload size={16} />}
+                            >
+                              {t('download')}
+                            </Button>
+                          ) : null}
+                          {isAdmin && episode.downloadStatus === 'FAILED' ? (
+                            <Button
+                              size="compact-xs"
+                              variant="outline"
+                              color="orange"
+                              onClick={() => retryEpisode(episode.id)}
+                              leftSection={<IconRotate size={16} />}
+                            >
+                              {t('retry')}
+                            </Button>
+                          ) : null}
+                          {isAdmin && episode.downloadStatus === 'PENDING' ? (
+                            <Button
+                              size="compact-xs"
+                              variant="outline"
+                              color="MediumSeaGreen"
+                              onClick={() => cancelEpisode(episode.id)}
+                              leftSection={<IconCircleX size={16} />}
+                            >
+                              {t('cancel')}
+                            </Button>
+                          ) : null}
+                          {isAdmin && ['COMPLETED', 'FAILED'].includes(episode.downloadStatus) ? (
+                            <Tooltip
+                              label={t('episode_delete_with_files_hint')}
+                              withArrow
+                              transitionProps={{ duration: 200 }}
+                            >
+                              <Button
+                                size="compact-xs"
+                                variant="outline"
+                                color="red"
+                                onClick={() => deleteEpisode(episode.id)}
+                                leftSection={<IconBackspace size={16} />}
+                              >
+                                {t('delete')}
+                              </Button>
+                            </Tooltip>
+                          ) : null}
+                        </Group>
+                      </Group>
+                    </Stack>
+                  </Group>
+                </Card>
+                );
+              })}
+            </Stack>
+            {/* Loader for infinite scrolling */}
+            {loadingEpisodes && (
+              <Center>
+                <Loader />
+              </Center>
+            )}
+            {isAdmin && !hasMoreEpisodes && episodes.length > 0 && !isPlaylist && (
+              <Center>
+                <Button
+                  variant="outline"
+                  fullWidth
+                  onClick={handleFetchHistory}
+                  loading={loadingHistory}
+                  color={historyButtonColor}
+                  leftSection={historyButtonIcon}
+                >
+                  {historyButtonLabel}
+                </Button>
+              </Center>
+            )}
+          </Stack>
+        )}
+      </Box>
+
+      <Modal
+        opened={batchDownloadModalOpened}
+        onClose={handleBatchModalClose}
+        title={t('batch_download', { defaultValue: 'Batch download' })}
+        size={isSmallScreen ? '100%' : '80%'}
+        fullScreen={isSmallScreen}
+        yOffset={isSmallScreen ? 0 : '3vh'}
+        withCloseButton={!batchSubmitting}
+        closeOnEscape={!batchSubmitting}
+        closeOnClickOutside={!batchSubmitting}
+      >
+        <Stack gap="sm">
+          <Group justify="space-between" align="center">
+            <Text size="sm" c="dimmed">
+              {t('batch_download_selected_count', {
+                selected: selectedBatchEpisodeIds.length,
+                total: batchTotalCount,
+                defaultValue: 'Selected {{selected}} / {{total}}',
+              })}
+            </Text>
+            {batchLoadingEpisodes ? <Loader size="xs" /> : null}
+          </Group>
+
+          <ScrollArea h={isSmallScreen ? 420 : '64vh'} type="auto">
+            <Table withTableBorder withColumnBorders striped highlightOnHover stickyHeader>
+              <Table.Thead>
+                <Table.Tr>
+                  <Table.Th colSpan={4}>
+                    <TextInput
+                      size="xs"
+                      placeholder={t('batch_download_search_title', {
+                        defaultValue: 'Search episode title',
+                      })}
+                      value={batchSearchInput}
+                      onChange={(event) => setBatchSearchInput(event.currentTarget.value)}
+                      onKeyDown={(event) => {
+                        if (event.key === 'Enter') {
+                          setBatchSearchQuery(batchSearchInput.trim());
+                        }
+                      }}
+                      leftSection={<IconSearch size={14} />}
+                      rightSectionWidth={72}
+                      rightSection={
+                        <Button
+                          size="compact-xs"
+                          variant="subtle"
+                          onClick={() => setBatchSearchQuery(batchSearchInput.trim())}
+                        >
+                          {t('search', { defaultValue: 'Search' })}
+                        </Button>
+                      }
+                    />
+                  </Table.Th>
+                </Table.Tr>
+                <Table.Tr>
+                  <Table.Th w={48}>
+                    <Checkbox
+                      aria-label={t('select_current_page', { defaultValue: 'Select current page' })}
+                      checked={isBatchCurrentPageChecked}
+                      indeterminate={isBatchCurrentPageIndeterminate}
+                      onChange={(event) =>
+                        handleToggleBatchCurrentPage(event.currentTarget.checked)
+                      }
+                      disabled={batchEpisodes.length === 0 || batchSubmitting}
+                    />
+                  </Table.Th>
+                  <Table.Th>{t('title', { defaultValue: 'Title' })}</Table.Th>
+                  <Table.Th w={120}>{t('published_at', { defaultValue: 'Published' })}</Table.Th>
+                  <Table.Th w={120}>{t('duration', { defaultValue: 'Duration' })}</Table.Th>
+                </Table.Tr>
+              </Table.Thead>
+              <Table.Tbody>
+                {batchEpisodes.map((episode) => (
+                  <Table.Tr key={episode.id}>
+                    <Table.Td>
+                      <Checkbox
+                        aria-label={episode.title}
+                        checked={selectedBatchEpisodeIds.includes(episode.id)}
+                        onChange={(event) =>
+                          handleToggleBatchEpisode(episode.id, event.currentTarget.checked)
+                        }
+                        disabled={batchSubmitting}
+                      />
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm" lineClamp={1} title={episode.title}>
+                        {episode.title}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm">
+                        {episode.publishedAt
+                          ? formatDateWithPattern(episode.publishedAt, dateFormat)
+                          : t('unknown_date')}
+                      </Text>
+                    </Table.Td>
+                    <Table.Td>
+                      <Text size="sm">
+                        {episode.duration ? formatISODuration(episode.duration) : '-'}
+                      </Text>
+                    </Table.Td>
+                  </Table.Tr>
+                ))}
+              </Table.Tbody>
+            </Table>
+          </ScrollArea>
+
+          {!batchLoadingEpisodes && batchEpisodes.length === 0 ? (
+            <Center py="md">
+              <Text c="dimmed">
+                {t('batch_download_empty', { defaultValue: 'No downloadable episodes found' })}
+              </Text>
+            </Center>
+          ) : null}
+
+          <Group justify="space-between" align="center" wrap="no-wrap">
+            <Group align="center" wrap="wrap">
+              <Group justify="flex-end">
+                <Button
+                  variant="default"
+                  onClick={handleBatchModalClose}
+                  disabled={batchSubmitting}
+                  size="xs"
+                >
+                  {t('cancel')}
+                </Button>
+                <Button
+                  onClick={handleBatchDownloadSubmit}
+                  loading={batchSubmitting}
+                  leftSection={<IconDownload size={16} />}
+                  size="xs"
+                  disabled={selectedBatchEpisodeIds.length === 0}
+                >
+                  {t('batch_download', { defaultValue: 'Batch download' })}
+                </Button>
+              </Group>
+            </Group>
+
+            <Group>
+              {batchTotalPages > 1 ? (
+                <Flex justify="flex-end">
+                  <Pagination
+                    withEdges
+                    value={batchCurrentPage}
+                    onChange={setBatchCurrentPage}
+                    total={batchTotalPages}
+                    size="sm"
+                  />
+                </Flex>
+              ) : null}
+
+              {!isPlaylist ? (
+                <Tooltip label={historyButtonLabel} withArrow>
+                  <ActionIcon
+                    onClick={handleFetchHistoryForBatch}
+                    loading={batchLoadingHistory}
+                    color={historyButtonColor}
+                    size={25}
+                  >
+                    {historyActionIcon}
+                  </ActionIcon>
+                </Tooltip>
+              ) : (
+                <Box />
+              )}
+            </Group>
+          </Group>
+        </Stack>
+      </Modal>
+
+      {/* Delete Channel Confirmation Modal */}
+      <Modal
+        opened={confirmDeleteFeedOpened}
+        onClose={closeConfirmDeleteFeed}
+        title={t('confirm_delete_channel')}
+      >
+        <Text fw={500}>{t('confirm_delete_channel_tip')}</Text>
+        <Group justify="flex-end" mt="md">
+          <Button
+            color="red"
+            loading={deleting}
+            onClick={() => {
+              deleteFeed().then(closeConfirmDeleteFeed);
+            }}
+          >
+            {t('confirm')}
+          </Button>
+        </Group>
+      </Modal>
+
+      <EditFeedModal
+        opened={editConfigOpened}
+        onClose={closeEditConfig}
+        title={t('edit_channel_configuration')}
+        feed={feed}
+        onFeedChange={setFeed}
+        isPlaylist={isPlaylist}
+        size="lg"
+        autoDownloadLimitField={
+          <NumberInput
+            label={t('auto_download_limit')}
+            name="autoDownloadLimit"
+            placeholder={t('3')}
+            value={feed?.autoDownloadLimit}
+            onChange={(value) => setFeed({ ...feed, autoDownloadLimit: value })}
+            disabled={feed?.autoDownloadEnabled === false}
+          />
+        }
+        actionButtons={
+          <Group mt="md" justify="flex-end">
+            <Button variant="default" onClick={closeEditConfig}>
+              {t('cancel')}
+            </Button>
+            <Button variant="filled" onClick={updateFeedConfig}>
+              {t('save')}
+            </Button>
+          </Group>
+        }
+      />
+
+      {/* Copy Modal for manual copy */}
+      <CopyModal
+        opened={copyModalOpened}
+        onClose={closeCopyModal}
+        text={copyText}
+        title={t('manual_copy_title')}
+      />
+
+      {/* Customize Feed Modal */}
+      <Modal
+        opened={customizeFeedModalOpened}
+        onClose={closeCustomizeFeedModal}
+        title={t('edit_title')}
+      >
+        <Stack>
+          <TextInput
+            label={t('custom_title')}
+            value={editingTitle}
+            onChange={(event) => setEditingTitle(event.currentTarget.value)}
+            data-autofocus
+          />
+          <Grid align="flex-end">
+            <Grid.Col span="auto">
+              <FileInput
+                label={t('custom_cover')}
+                placeholder={t('upload_image')}
+                value={customCoverFile}
+                onChange={setCustomCoverFile}
+                accept="image/jpeg,image/png,image/webp"
+                clearable
+              />
+            </Grid.Col>
+            {feed.customCoverUrl && (
+              <Grid.Col span="content">
+                <Button
+                  variant="outline"
+                  color="red"
+                  onClick={() => {
+                    handleClearCustomCover().then(() => {});
+                  }}
+                >
+                  {t('clear_cover')}
+                </Button>
+              </Grid.Col>
+            )}
+          </Grid>
+        </Stack>
+        <Group justify="flex-end" mt="xl">
+          <Button variant="default" onClick={closeCustomizeFeedModal}>
+            {t('cancel')}
+          </Button>
+          <Button
+            onClick={() => {
+              handleUpdateCustomFeed().then(() => {});
+            }}
+          >
+            {t('confirm')}
+          </Button>
+        </Group>
+      </Modal>
+    </Container>
+  );
+};
+
+export default FeedDetail;

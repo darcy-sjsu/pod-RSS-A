@@ -1,0 +1,990 @@
+package top.asimov.pigeon.service;
+
+import com.baomidou.mybatisplus.core.conditions.query.LambdaQueryWrapper;
+import com.baomidou.mybatisplus.core.conditions.query.QueryWrapper;
+import com.baomidou.mybatisplus.extension.plugins.pagination.Page;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
+import java.time.Duration;
+import java.time.LocalDateTime;
+import java.util.ArrayList;
+import java.util.Collection;
+import java.util.Collections;
+import java.util.List;
+import java.util.Map;
+import java.util.Set;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
+import lombok.extern.slf4j.Slf4j;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.MessageSource;
+import org.springframework.context.i18n.LocaleContextHolder;
+import org.springframework.stereotype.Service;
+import org.springframework.transaction.annotation.Transactional;
+import org.springframework.util.StringUtils;
+import top.asimov.pigeon.config.DownloadProperties;
+import top.asimov.pigeon.config.StorageProperties;
+import top.asimov.pigeon.event.EpisodesCreatedEvent;
+import top.asimov.pigeon.exception.BusinessException;
+import top.asimov.pigeon.mapper.ChannelMapper;
+import top.asimov.pigeon.mapper.EpisodeMapper;
+import top.asimov.pigeon.mapper.PlaylistEpisodeMapper;
+import top.asimov.pigeon.mapper.PlaylistMapper;
+import top.asimov.pigeon.model.entity.Channel;
+import top.asimov.pigeon.model.entity.Episode;
+import top.asimov.pigeon.model.entity.Feed;
+import top.asimov.pigeon.model.entity.Playlist;
+import top.asimov.pigeon.model.enums.EpisodeBatchAction;
+import top.asimov.pigeon.model.enums.EpisodeStatus;
+import top.asimov.pigeon.model.response.EpisodeStatisticsResponse;
+import top.asimov.pigeon.service.storage.S3StorageService;
+import top.asimov.pigeon.util.EpisodeRetryPlanner;
+import top.asimov.pigeon.util.FeedEpisodeVisibilityHelper;
+import top.asimov.pigeon.util.MediaKeyUtil;
+
+@Slf4j
+@Service
+public class EpisodeService {
+
+  private final EpisodeMapper episodeMapper;
+  private final ApplicationEventPublisher eventPublisher;
+  private final MessageSource messageSource;
+  private final ChannelMapper channelMapper;
+  private final PlaylistEpisodeMapper playlistEpisodeMapper;
+  private final PlaylistMapper playlistMapper;
+  private final StorageProperties storageProperties;
+  private final S3StorageService s3StorageService;
+  private final DownloadProperties downloadProperties;
+
+  public EpisodeService(EpisodeMapper episodeMapper, ApplicationEventPublisher eventPublisher,
+      MessageSource messageSource, ChannelMapper channelMapper,
+      PlaylistEpisodeMapper playlistEpisodeMapper, PlaylistMapper playlistMapper,
+      StorageProperties storageProperties,
+      S3StorageService s3StorageService, DownloadProperties downloadProperties) {
+    this.episodeMapper = episodeMapper;
+    this.eventPublisher = eventPublisher;
+    this.messageSource = messageSource;
+    this.channelMapper = channelMapper;
+    this.playlistEpisodeMapper = playlistEpisodeMapper;
+    this.playlistMapper = playlistMapper;
+    this.storageProperties = storageProperties;
+    this.s3StorageService = s3StorageService;
+    this.downloadProperties = downloadProperties;
+  }
+
+  public boolean isS3Mode() {
+    return storageProperties.isS3Mode();
+  }
+
+  public Page<Episode> episodePage(String feedId, Page<Episode> page, String search, String sort, String filter) {
+    String statusFilter = resolveStatusFilter(filter);
+    Channel channel = channelMapper.selectById(feedId);
+    if (channel != null) {
+      List<Episode> episodes = listChannelEpisodes(feedId, search, sort, statusFilter);
+      return paginateVisibleEpisodes(channel, episodes, page);
+    }
+
+    Playlist playlist = playlistMapper.selectById(feedId);
+    if (playlist == null) {
+      page.setTotal(0);
+      page.setRecords(Collections.emptyList());
+      return page;
+    }
+    List<Episode> episodes = playlistEpisodeMapper.selectEpisodesByPlaylistIdWithFilters(feedId,
+        StringUtils.hasText(search) ? search.trim() : null, statusFilter, sort);
+    if (episodes.isEmpty()) {
+      page.setTotal(0);
+      page.setRecords(Collections.emptyList());
+      return page;
+    }
+    return paginateVisibleEpisodes(playlist, episodes, page);
+  }
+
+  private static String resolveStatusFilter(String filter) {
+    if ("downloaded".equalsIgnoreCase(filter)) {
+      return EpisodeStatus.COMPLETED.name();
+    }
+    if ("ready".equalsIgnoreCase(filter)) {
+      return EpisodeStatus.READY.name();
+    }
+    return null;
+  }
+
+  public List<Episode> findByChannelId(String channelId) {
+    LambdaQueryWrapper<Episode> queryWrapper = new LambdaQueryWrapper<>();
+    queryWrapper.eq(Episode::getChannelId, channelId);
+    return episodeMapper.selectList(queryWrapper);
+  }
+
+  public List<Episode> getEpisodeOrderByPublishDateDesc(String channelId) {
+    LambdaQueryWrapper<Episode> queryWrapper = new LambdaQueryWrapper<>();
+    queryWrapper.eq(Episode::getChannelId, channelId)
+        .eq(Episode::getDownloadStatus, EpisodeStatus.COMPLETED)
+        .orderByDesc(Episode::getPublishedAt);
+    return episodeMapper.selectList(queryWrapper);
+  }
+
+  public List<Episode> getEpisodesByPlaylistId(String playlistId) {
+    return episodeMapper.selectEpisodesByPlaylistId(playlistId);
+  }
+
+  public Episode getEarliestEpisodeByChannelId(String channelId) {
+    if (!StringUtils.hasText(channelId)) {
+      return null;
+    }
+    return episodeMapper.selectEarliestByChannelId(channelId);
+  }
+
+  public List<Episode> getEpisodesByIds(List<String> episodeIds) {
+    if (episodeIds == null || episodeIds.isEmpty()) {
+      return Collections.emptyList();
+    }
+    return episodeMapper.selectBatchIds(episodeIds);
+  }
+
+  public List<Episode> getEpisodesBasicByIds(List<String> episodeIds) {
+    if (episodeIds == null || episodeIds.isEmpty()) {
+      return Collections.emptyList();
+    }
+    LambdaQueryWrapper<Episode> queryWrapper = new LambdaQueryWrapper<>();
+    queryWrapper.in(Episode::getId, episodeIds);
+    queryWrapper.select(
+        Episode::getId,
+        Episode::getTitle,
+        Episode::getDescription,
+        Episode::getDuration,
+        Episode::getDurationSeconds,
+        Episode::getPublishedAt
+    );
+    return episodeMapper.selectList(queryWrapper);
+  }
+
+  public List<Episode> getVisibleCompletedEpisodesForChannel(Channel channel) {
+    if (channel == null) {
+      return Collections.emptyList();
+    }
+    List<Episode> episodes = getEpisodeOrderByPublishDateDesc(channel.getId());
+    return FeedEpisodeVisibilityHelper.filterVisibleEpisodes(channel, episodes);
+  }
+
+  public List<Episode> getVisibleCompletedEpisodesForPlaylist(Playlist playlist) {
+    if (playlist == null) {
+      return Collections.emptyList();
+    }
+    List<Episode> completed = episodeMapper.selectEpisodesByPlaylistId(playlist.getId()).stream()
+        .filter(episode -> EpisodeStatus.COMPLETED.name().equals(episode.getDownloadStatus()))
+        .toList();
+    return FeedEpisodeVisibilityHelper.filterVisibleEpisodes(playlist, completed);
+  }
+
+  private List<Episode> listChannelEpisodes(String feedId, String search, String sort, String statusFilter) {
+    LambdaQueryWrapper<Episode> queryWrapper = new LambdaQueryWrapper<>();
+    queryWrapper.eq(Episode::getChannelId, feedId);
+    if (StringUtils.hasText(search)) {
+      queryWrapper.like(Episode::getTitle, search.trim());
+    }
+    if (statusFilter != null) {
+      queryWrapper.eq(Episode::getDownloadStatus, statusFilter);
+    }
+    boolean oldestFirst = "oldest".equalsIgnoreCase(sort);
+    queryWrapper.orderBy(true, oldestFirst, Episode::getPublishedAt);
+    return episodeMapper.selectList(queryWrapper);
+  }
+
+  private Page<Episode> paginateVisibleEpisodes(Feed feed, List<Episode> episodes, Page<Episode> page) {
+    List<Episode> visibleEpisodes = FeedEpisodeVisibilityHelper.filterVisibleEpisodes(feed, episodes);
+    long total = visibleEpisodes.size();
+    page.setTotal(total);
+    if (total == 0) {
+      page.setRecords(Collections.emptyList());
+      return page;
+    }
+    long current = page.getCurrent() > 0 ? page.getCurrent() : 1;
+    long size = page.getSize() > 0 ? page.getSize() : 10;
+    int fromIndex = (int) Math.min((current - 1) * size, total);
+    int toIndex = (int) Math.min(fromIndex + size, total);
+    page.setRecords(visibleEpisodes.subList(fromIndex, toIndex));
+    return page;
+  }
+
+  @Transactional
+  public void saveEpisodes(List<Episode> episodes) {
+    // 1. 列表内部去重：防止传入的 list 中包含重复的 ID
+    // 使用 Map 以 ID 为键，保留第一个出现的对象
+    Collection<Episode> distinctEpisodes = episodes.stream()
+        .collect(Collectors.toMap(
+            Episode::getId,
+            e -> e,
+            (existing, replacement) -> existing
+        ))
+        .values();
+
+    // 2. 检查数据库中已存在的记录
+    QueryWrapper<Episode> queryWrapper = new QueryWrapper<>();
+    queryWrapper.in("id", distinctEpisodes.stream().map(Episode::getId).toList());
+    List<Episode> existingEpisodes = episodeMapper.selectList(queryWrapper);
+
+    // 3. 排除数据库已有的 ID
+    List<Episode> finalEpisodesToSave = new ArrayList<>(distinctEpisodes);
+    if (!existingEpisodes.isEmpty()) {
+      Set<String> existingIds = existingEpisodes.stream()
+          .map(Episode::getId)
+          .collect(Collectors.toSet()); // 使用 Set 提高查询效率
+      finalEpisodesToSave.removeIf(episode -> existingIds.contains(episode.getId()));
+    }
+    // 4. 入库
+    finalEpisodesToSave.forEach(episodeMapper::insert);
+  }
+
+  /**
+   * 将已存在且尚未归属频道的节目补回指定 channelId。
+   *
+   * <p>仅回填 channel_id 为空的记录，不覆盖已有归属。</p>
+   *
+   * @param channelId 频道 ID
+   * @param episodes  候选节目列表（通常为当前频道过滤后结果）
+   */
+  @Transactional
+  public void backfillChannelIdIfMissing(String channelId, List<Episode> episodes) {
+    if (!StringUtils.hasText(channelId) || episodes == null || episodes.isEmpty()) {
+      return;
+    }
+    for (Episode episode : episodes) {
+      if (episode == null || !StringUtils.hasText(episode.getId())) {
+        continue;
+      }
+      episodeMapper.updateChannelIdIfMissing(episode.getId(), channelId);
+    }
+  }
+
+  /**
+   * 将指定节目批量标记为 PENDING，用于自动下载队列。
+   */
+  @Transactional
+  public void markEpisodesPending(List<Episode> episodes) {
+    if (episodes == null || episodes.isEmpty()) {
+      return;
+    }
+    for (Episode episode : episodes) {
+      if (episode == null || episode.getId() == null) {
+        continue;
+      }
+      episodeMapper.updateDownloadStatusAndClearSchedulingFields(episode.getId(),
+          EpisodeStatus.PENDING.name());
+      episode.setDownloadStatus(EpisodeStatus.PENDING.name());
+      episode.setNextRetryAt(null);
+      episode.setFailureNotifiedAt(null);
+      episode.setDownloadStartedAt(null);
+      episode.setAutoDownloadAfter(null);
+    }
+  }
+
+  /**
+   * 将指定节目登记为“延迟自动下载”，到期前保持 READY 状态。
+   */
+  @Transactional
+  public void markEpisodesDelayedAutoDownload(List<Episode> episodes) {
+    if (episodes == null || episodes.isEmpty()) {
+      return;
+    }
+    for (Episode episode : episodes) {
+      if (episode == null || episode.getId() == null || episode.getAutoDownloadAfter() == null) {
+        continue;
+      }
+      episodeMapper.updateAutoDownloadAfterWhenReady(episode.getId(), episode.getAutoDownloadAfter());
+    }
+  }
+
+  /**
+   * 将到期的延迟自动下载任务从 READY 提升到 PENDING 并发布下载事件。
+   *
+   * @param limit 本轮最多提升的任务数量
+   * @return 实际提升的任务数量
+   */
+  @Transactional
+  public int promoteDueDelayedAutoDownloadEpisodes(int limit) {
+    if (limit <= 0) {
+      return 0;
+    }
+    LocalDateTime now = LocalDateTime.now();
+    List<Episode> candidates = episodeMapper.selectDueDelayedAutoDownloadEpisodes(now, limit);
+    if (candidates.isEmpty()) {
+      return 0;
+    }
+
+    List<String> promotedEpisodeIds = new ArrayList<>();
+    for (Episode episode : candidates) {
+      if (episode == null || episode.getId() == null) {
+        continue;
+      }
+      int updated = episodeMapper.promoteDueDelayedAutoDownload(
+          episode.getId(), EpisodeStatus.PENDING.name(), now);
+      if (updated > 0) {
+        promotedEpisodeIds.add(episode.getId());
+      }
+    }
+
+    if (!promotedEpisodeIds.isEmpty()) {
+      eventPublisher.publishEvent(new EpisodesCreatedEvent(
+          this,
+          promotedEpisodeIds,
+          "trigger=delayed_auto_download_promotion"));
+    }
+    return promotedEpisodeIds.size();
+  }
+
+  /**
+   * 将运行中过久的 DOWNLOADING 任务回收为 FAILED，并复用现有失败自动重试计划。
+   */
+  @Transactional
+  public int recoverStaleDownloadingEpisodes(int limit) {
+    if (limit <= 0) {
+      return 0;
+    }
+
+    LocalDateTime now = LocalDateTime.now();
+    LocalDateTime staleBefore = now.minus(
+        Duration.ofMinutes(downloadProperties.staleDownloadingTimeoutMinutes()));
+    List<Episode> candidates = episodeMapper.selectStaleDownloadingEpisodes(staleBefore, limit);
+    if (candidates.isEmpty()) {
+      return 0;
+    }
+
+    int recoveredCount = 0;
+    List<String> recoveredIds = new ArrayList<>();
+    for (Episode episode : candidates) {
+      if (episode == null || episode.getId() == null || episode.getDownloadStartedAt() == null) {
+        continue;
+      }
+      episode.setMediaFilePath(null);
+      episode.setMediaSizeBytes(null);
+      episode.setMediaEtag(null);
+      episode.setMediaType(null);
+      episode.setDownloadStatus(EpisodeStatus.FAILED.name());
+      episode.setErrorLog(
+          "download task timed out in DOWNLOADING state and was recovered by scheduler");
+      episode.setFailureNotifiedAt(null);
+      EpisodeRetryPlanner.scheduleNextRetry(episode, now);
+
+      int updated = episodeMapper.recoverStaleDownloadingEpisode(episode);
+      if (updated > 0) {
+        recoveredCount++;
+        recoveredIds.add(episode.getId());
+      }
+    }
+
+    if (recoveredCount > 0) {
+      log.warn("[download] stale downloading episodes recovered: count={} timeoutMinutes={} episodeIds={}",
+          recoveredCount, downloadProperties.staleDownloadingTimeoutMinutes(), recoveredIds);
+    }
+    return recoveredCount;
+  }
+
+  @Transactional
+  public int deleteEpisodeById(String id) {
+    Episode episode = episodeMapper.selectById(id);
+    if (episode == null) {
+      log.info("[episode] delete rejected: episodeId={} reason=notFound", id);
+      throw new BusinessException(messageSource.getMessage("episode.not.found",
+          new Object[]{id}, LocaleContextHolder.getLocale()));
+    }
+
+    String audioFilePath = episode.getMediaFilePath();
+    if (isS3Mode()) {
+      deleteEpisodeAssetsByMediaPath(audioFilePath);
+      episode.setDownloadStatus(EpisodeStatus.READY.toString());
+      episode.setMediaFilePath(null);
+      episode.setMediaType(null);
+      episode.setMediaSizeBytes(null);
+      episode.setMediaEtag(null);
+      episode.setRetryNumber(0);
+      episode.setNextRetryAt(null);
+      episode.setFailureNotifiedAt(null);
+      episode.setErrorLog(null);
+      return episodeMapper.updateById(episode);
+    }
+
+    // 删除同名字幕文件（safeTitle.lang.ext），支持 vtt/srt
+    deleteSubtitleFiles(audioFilePath);
+
+    // 删除同名封面文件（safeTitle.ext），当前为 jpg
+    deleteThumbnailFiles(audioFilePath);
+
+    // 删除 Podcasting 2.0 章节文件（episodeId.chapters.json）
+    deleteChaptersFile(audioFilePath, episode.getId());
+
+    if (StringUtils.hasText(audioFilePath)) {
+      try {
+        Files.deleteIfExists(Paths.get(audioFilePath));
+      } catch (Exception e) {
+        log.error("[storage] media file delete failed: episodeId={} filePath={}", id,
+            audioFilePath, e);
+        throw new BusinessException(
+            messageSource.getMessage("episode.delete.audio.failed", new Object[]{audioFilePath},
+                LocaleContextHolder.getLocale()));
+      }
+    }
+
+    // 清除 Episode 的文件路径以及状态
+    episode.setDownloadStatus(EpisodeStatus.READY.toString());
+    episode.setMediaFilePath(null);
+    episode.setMediaType(null);
+    episode.setMediaSizeBytes(null);
+    episode.setMediaEtag(null);
+    episode.setRetryNumber(0);
+    episode.setNextRetryAt(null);
+    episode.setFailureNotifiedAt(null);
+    episode.setErrorLog(null);
+    return episodeMapper.updateById(episode);
+  }
+
+  @Transactional
+  public int deleteEpisodeCompletelyById(String id) {
+    Episode episode = episodeMapper.selectById(id);
+    if (episode == null) {
+      return 0;
+    }
+
+    String mediaFilePath = episode.getMediaFilePath();
+    if (isS3Mode()) {
+      deleteEpisodeAssetsByMediaPath(mediaFilePath);
+      return episodeMapper.deleteById(id);
+    }
+
+    if (StringUtils.hasText(mediaFilePath)) {
+      deleteSubtitleFiles(mediaFilePath);
+      deleteThumbnailFiles(mediaFilePath);
+      deleteChaptersFile(mediaFilePath, id);
+      try {
+        Files.deleteIfExists(Paths.get(mediaFilePath));
+      } catch (Exception e) {
+        log.error("[storage] media file delete failed: episodeId={} filePath={}", id,
+            mediaFilePath, e);
+        throw new BusinessException(
+            messageSource.getMessage("episode.delete.audio.failed", new Object[]{mediaFilePath},
+                LocaleContextHolder.getLocale()));
+      }
+    }
+
+    return episodeMapper.deleteById(id);
+  }
+
+  void deleteSubtitleFiles(String mediaFilePath) {
+    if (isS3Mode()) {
+      return;
+    }
+    if (!StringUtils.hasText(mediaFilePath)) {
+      return;
+    }
+    try {
+      Path mediaPath = Paths.get(mediaFilePath);
+      Path parent = mediaPath.getParent();
+      if (parent == null) {
+        return;
+      }
+
+      String fileName = mediaPath.getFileName().toString();
+      String baseName;
+      int dotIndex = fileName.lastIndexOf('.');
+      if (dotIndex > 0) {
+        baseName = fileName.substring(0, dotIndex);
+      } else {
+        baseName = fileName;
+      }
+
+      try (Stream<Path> pathStream = Files.list(parent)) {
+        List<Path> subtitleFiles = pathStream
+            .filter(path -> {
+              String name = path.getFileName().toString();
+              boolean subtitleExt = name.endsWith(".vtt") || name.endsWith(".srt");
+              boolean samePrefix = name.startsWith(baseName + ".");
+              boolean isMediaFile = name.equals(fileName);
+              return subtitleExt && samePrefix && !isMediaFile;
+            }).toList();
+
+        for (Path subtitlePath : subtitleFiles) {
+          try {
+            Files.deleteIfExists(subtitlePath);
+          } catch (Exception e) {
+            log.error("[storage] subtitle file delete failed: path={}", subtitlePath, e);
+            throw new BusinessException("Failed to delete subtitle file: " + subtitlePath);
+          }
+        }
+      }
+    } catch (BusinessException e) {
+      throw e;
+    } catch (Exception e) {
+      log.error("[storage] subtitle files delete failed: mediaFilePath={}", mediaFilePath, e);
+      throw new BusinessException("Failed to delete subtitle files for media: " + mediaFilePath);
+    }
+  }
+
+  /**
+   * 删除与媒体文件同名的封面文件（缩略图）。
+   * <p>
+   * 目前 yt-dlp 通过 {@code --write-thumbnail --convert-thumbnails jpg} 在与媒体文件同一目录下生成 {@code safeTitle.jpg} 等文件。
+   * 本方法会根据媒体文件名（不含扩展名）删除所有同前缀的 JPG/PNG/WEBP 文件。
+   * </p>
+   *
+   * @param mediaFilePath 媒体文件完整路径
+   */
+  void deleteThumbnailFiles(String mediaFilePath) {
+    if (isS3Mode()) {
+      return;
+    }
+    if (!StringUtils.hasText(mediaFilePath)) {
+      return;
+    }
+    try {
+      Path mediaPath = Paths.get(mediaFilePath);
+      Path parent = mediaPath.getParent();
+      if (parent == null) {
+        return;
+      }
+
+      String fileName = mediaPath.getFileName().toString();
+      String baseName;
+      int dotIndex = fileName.lastIndexOf('.');
+      if (dotIndex > 0) {
+        baseName = fileName.substring(0, dotIndex);
+      } else {
+        baseName = fileName;
+      }
+
+      try (Stream<Path> pathStream = Files.list(parent)) {
+        List<Path> thumbnailFiles = pathStream
+            .filter(path -> {
+              String name = path.getFileName().toString();
+              boolean imageExt =
+                  name.endsWith(".jpg") || name.endsWith(".jpeg")
+                      || name.endsWith(".png") || name.endsWith(".webp");
+              boolean samePrefix = name.startsWith(baseName + ".");
+              boolean isMediaFile = name.equals(fileName);
+              return imageExt && samePrefix && !isMediaFile;
+            }).toList();
+
+        for (Path thumbnailPath : thumbnailFiles) {
+          try {
+            Files.deleteIfExists(thumbnailPath);
+          } catch (Exception e) {
+            log.error("[storage] thumbnail file delete failed: path={}", thumbnailPath, e);
+            throw new BusinessException("Failed to delete thumbnail file: " + thumbnailPath);
+          }
+        }
+      }
+    } catch (BusinessException e) {
+      throw e;
+    } catch (Exception e) {
+      log.error("[storage] thumbnail files delete failed: mediaFilePath={}", mediaFilePath, e);
+      throw new BusinessException(
+          "Failed to delete thumbnail files for media: " + mediaFilePath);
+    }
+  }
+
+  void deleteChaptersFile(String mediaFilePath, String episodeId) {
+    if (isS3Mode()) {
+      return;
+    }
+    if (!StringUtils.hasText(mediaFilePath) || !StringUtils.hasText(episodeId)) {
+      return;
+    }
+    try {
+      Path mediaPath = Paths.get(mediaFilePath);
+      Path parent = mediaPath.getParent();
+      if (parent == null) {
+        return;
+      }
+      String fileName = mediaPath.getFileName().toString();
+      int dotIndex = fileName.lastIndexOf('.');
+      String mediaBaseName = dotIndex > 0 ? fileName.substring(0, dotIndex) : fileName;
+
+      Path byMediaName = parent.resolve(mediaBaseName + ".chapters.json");
+      Files.deleteIfExists(byMediaName);
+    } catch (Exception e) {
+      log.error("[storage] chapters file delete failed: episodeId={} mediaFilePath={}",
+          episodeId, mediaFilePath, e);
+      throw new BusinessException("Failed to delete chapters file for episode: " + episodeId);
+    }
+  }
+
+  public int deleteEpisodesByChannelId(String channelId) {
+    LambdaQueryWrapper<Episode> wrapper = new LambdaQueryWrapper<>();
+    wrapper.eq(Episode::getChannelId, channelId);
+    return episodeMapper.delete(wrapper);
+  }
+
+  /**
+   * 清理已完成下载的节目： - 删除对应的媒体文件及字幕文件 - 保留数据库记录，将 download_status 重置为 READY - 清空 mediaFilePath 和 errorLog，表示当前本地没有已下载文件
+   * 该方法主要用于 EpisodeCleaner 定时任务。
+   */
+  @Transactional
+  public void cleanupCompletedEpisode(Episode episode) {
+    if (episode == null || episode.getId() == null) {
+      return;
+    }
+
+    Episode persisted = episodeMapper.selectById(episode.getId());
+    if (persisted == null) {
+      log.warn("[episode] cleanup skipped: episodeId={} reason=notFound", episode.getId());
+      return;
+    }
+
+    if (!EpisodeStatus.COMPLETED.name().equals(persisted.getDownloadStatus())) {
+      // 状态已被其他流程修改（例如正在重试/手动删除），跳过清理
+      return;
+    }
+
+    String mediaFilePath = persisted.getMediaFilePath();
+    if (isS3Mode()) {
+      deleteEpisodeAssetsByMediaPath(mediaFilePath);
+      persisted.setMediaFilePath(null);
+      persisted.setMediaSizeBytes(null);
+      persisted.setMediaEtag(null);
+      persisted.setDownloadStatus(EpisodeStatus.READY.name());
+      persisted.setRetryNumber(0);
+      persisted.setNextRetryAt(null);
+      persisted.setFailureNotifiedAt(null);
+      persisted.setErrorLog(null);
+      episodeMapper.updateById(persisted);
+      return;
+    }
+
+    if (StringUtils.hasText(mediaFilePath)) {
+      try {
+        deleteSubtitleFiles(mediaFilePath);
+        deleteThumbnailFiles(mediaFilePath);
+        deleteChaptersFile(mediaFilePath, persisted.getId());
+
+        boolean deleted = Files.deleteIfExists(Paths.get(mediaFilePath));
+        if (deleted) {
+          log.info("[storage] episode media file cleaned: episodeId={} filePath={}",
+              persisted.getId(), mediaFilePath);
+        } else {
+          log.info("[storage] episode media file cleanup skipped: episodeId={} filePath={} reason=fileMissing",
+              persisted.getId(), mediaFilePath);
+        }
+      } catch (Exception e) {
+        log.error("[storage] episode file cleanup failed: episodeId={} mediaFilePath={}",
+            persisted.getId(), mediaFilePath, e);
+        if (e instanceof BusinessException) {
+          throw (BusinessException) e;
+        }
+        String message = e.getMessage();
+        if (!StringUtils.hasText(message)) {
+          message = "Failed to delete episode files: " + mediaFilePath;
+        }
+        throw new BusinessException(message);
+      }
+    }
+
+    persisted.setMediaFilePath(null);
+    persisted.setMediaSizeBytes(null);
+    persisted.setMediaEtag(null);
+    persisted.setDownloadStatus(EpisodeStatus.READY.name());
+    persisted.setRetryNumber(0);
+    persisted.setNextRetryAt(null);
+    persisted.setFailureNotifiedAt(null);
+    persisted.setErrorLog(null);
+
+    episodeMapper.updateById(persisted);
+  }
+
+  /**
+   * 根据节目ID列表获取节目状态
+   *
+   * @param episodeIds 节目ID列表
+   * @return 节目状态列表（只包含状态相关字段）
+   */
+  public List<Episode> getEpisodeStatusByIds(List<String> episodeIds) {
+    if (episodeIds == null || episodeIds.isEmpty()) {
+      return Collections.emptyList();
+    }
+    LambdaQueryWrapper<Episode> queryWrapper = new LambdaQueryWrapper<>();
+    queryWrapper.in(Episode::getId, episodeIds);
+    // 只选择状态相关的字段，减少网络传输
+    queryWrapper.select(Episode::getId, Episode::getDownloadStatus, Episode::getErrorLog,
+        Episode::getMediaType);
+    return episodeMapper.selectList(queryWrapper);
+  }
+
+  public void deleteEpisodeAssetsByMediaPath(String mediaFilePath) {
+    if (!isS3Mode() || !StringUtils.hasText(mediaFilePath)) {
+      return;
+    }
+    String prefix = MediaKeyUtil.buildEpisodeAssetPrefixByMediaKey(mediaFilePath);
+    if (!StringUtils.hasText(prefix)) {
+      return;
+    }
+    s3StorageService.deleteObjectsByPrefixQuietly(prefix);
+  }
+
+  /**
+   * 重试下载episode音频文件
+   *
+   * @param episodeId episode id
+   */
+  @Transactional
+  public void retryEpisode(String episodeId) {
+    log.info("[download] retry requested: episodeId={}", episodeId);
+
+    // 1. 根据episode id查询出当前的episode
+    Episode episode = episodeMapper.selectById(episodeId);
+    if (episode == null) {
+      log.info("[download] retry rejected: episodeId={} reason=notFound", episodeId);
+      throw new BusinessException(
+          messageSource.getMessage("episode.not.found", new Object[]{episodeId},
+              LocaleContextHolder.getLocale()));
+    }
+
+    // 状态校验：只允许重试 FAILED 状态的 Episode
+    if (!EpisodeStatus.FAILED.name().equals(episode.getDownloadStatus())) {
+      log.info("[download] retry rejected: episodeId={} status={} reason=invalidStatus",
+          episodeId, episode.getDownloadStatus());
+      throw new BusinessException(
+          messageSource.getMessage("episode.retry.invalid.status",
+              new Object[]{episode.getDownloadStatus()},
+              LocaleContextHolder.getLocale()));
+    }
+
+    // 2. 删除当前episode的audio file，可能有，也可能没有，需要做好错误处理
+    String audioFilePath = episode.getMediaFilePath();
+    if (StringUtils.hasText(audioFilePath)) {
+      try {
+        deleteSubtitleFiles(audioFilePath);
+        deleteThumbnailFiles(audioFilePath);
+        deleteChaptersFile(audioFilePath, episodeId);
+
+        boolean deleted = Files.deleteIfExists(Paths.get(audioFilePath));
+        if (deleted) {
+          log.info("[storage] existing media file deleted before retry: episodeId={} filePath={}",
+              episodeId, audioFilePath);
+        } else {
+          log.info("[storage] existing media file missing before retry: episodeId={} filePath={}",
+              episodeId, audioFilePath);
+        }
+        // 清空数据库中的音频文件路径
+        episode.setMediaFilePath(null);
+        episodeMapper.updateById(episode);
+      } catch (Exception e) {
+        log.warn("[storage] existing media file delete before retry failed, continuing: episodeId={} filePath={} reason={}",
+            episodeId, audioFilePath, e.getMessage(), e);
+        // 不抛出异常，继续执行下载流程
+      }
+    } else {
+      log.info("[download] retry cleanup skipped: episodeId={} reason=mediaFilePathMissing",
+          episodeId);
+    }
+
+    episode.setRetryNumber(0);
+    episode.setNextRetryAt(LocalDateTime.now());
+    episode.setFailureNotifiedAt(null);
+    episode.setDownloadStartedAt(null);
+    episodeMapper.updateById(episode);
+
+    // 3. 调用事件发布机制，触发异步下载
+    log.info("[download] retry event published: episodeId={}", episodeId);
+    eventPublisher.publishEvent(
+        new EpisodesCreatedEvent(
+            this,
+            Collections.singletonList(episodeId),
+            "trigger=retry_download"));
+  }
+
+  /**
+   * 手动触发下载某个仅保存元数据但尚未下载内容的单集
+   *
+   * @param episodeId episode id
+   */
+  @Transactional
+  public void manualDownloadEpisode(String episodeId) {
+    log.info("[download] manual download requested: episodeId={}", episodeId);
+
+    Episode episode = episodeMapper.selectById(episodeId);
+    if (episode == null) {
+      log.info("[download] manual download rejected: episodeId={} reason=notFound", episodeId);
+      throw new BusinessException(
+          messageSource.getMessage("episode.not.found", new Object[]{episodeId},
+              LocaleContextHolder.getLocale()));
+    }
+
+    String status = episode.getDownloadStatus();
+    // 只允许对 READY 状态的单集进行手动下载
+    if (!EpisodeStatus.READY.name().equals(status)) {
+      log.info("[download] manual download rejected: episodeId={} status={} reason=invalidStatus",
+          episodeId, status);
+      throw new BusinessException(
+          messageSource.getMessage("episode.download.invalid.status",
+              new Object[]{status},
+              LocaleContextHolder.getLocale()));
+    }
+
+    markEpisodesPending(Collections.singletonList(episode));
+
+    // 通过发布事件，复用统一的下载异步流程
+    eventPublisher.publishEvent(
+        new EpisodesCreatedEvent(
+            this,
+            Collections.singletonList(episodeId),
+            "trigger=manual_download"));
+  }
+
+  /**
+   * 获取各状态的Episode统计数量
+   */
+  public EpisodeStatisticsResponse getStatistics() {
+    // 使用 GROUP BY 一次查询获取所有状态的统计
+    List<Map<String, Object>> statusCounts = episodeMapper.countGroupByStatus();
+
+    // 初始化所有计数为0
+    long pendingCount = 0L;
+    long downloadingCount = 0L;
+    long completedCount = 0L;
+    long failedCount = 0L;
+
+    // 遍历结果，填充对应状态的计数
+    for (Map<String, Object> row : statusCounts) {
+      String status = (String) row.get("status");
+      long count = ((Number) row.get("count")).longValue();
+
+      if (EpisodeStatus.PENDING.name().equals(status)) {
+        pendingCount = count;
+      } else if (EpisodeStatus.DOWNLOADING.name().equals(status)) {
+        downloadingCount = count;
+      } else if (EpisodeStatus.COMPLETED.name().equals(status)) {
+        completedCount = count;
+      } else if (EpisodeStatus.FAILED.name().equals(status)) {
+        failedCount = count;
+      }
+    }
+
+    return EpisodeStatisticsResponse.builder()
+        .pendingCount(pendingCount)
+        .downloadingCount(downloadingCount)
+        .completedCount(completedCount)
+        .failedCount(failedCount)
+        .build();
+  }
+
+  /**
+   * 分页查询指定状态的Episode列表
+   */
+  public Page<Episode> getEpisodesByStatus(EpisodeStatus status, Page<Episode> page) {
+    return episodeMapper.selectEpisodesByStatusWithFeedInfo(page, status.name());
+  }
+
+  /**
+   * 取消PENDING状态的任务
+   */
+  @Transactional
+  public void cancelPendingEpisode(String episodeId) {
+    log.info("[download] pending download cancel requested: episodeId={}", episodeId);
+
+    Episode episode = episodeMapper.selectById(episodeId);
+    if (episode == null) {
+      log.info("[download] pending download cancel rejected: episodeId={} reason=notFound",
+          episodeId);
+      throw new BusinessException(
+          messageSource.getMessage("episode.not.found", new Object[]{episodeId},
+              LocaleContextHolder.getLocale()));
+    }
+
+    // 状态校验：只允许取消 PENDING 状态的 Episode
+    if (!EpisodeStatus.PENDING.name().equals(episode.getDownloadStatus())) {
+      log.info("[download] pending download cancel rejected: episodeId={} status={} reason=invalidStatus",
+          episodeId, episode.getDownloadStatus());
+      throw new BusinessException(
+          messageSource.getMessage("episode.cancel.invalid.status",
+              new Object[]{episode.getDownloadStatus()},
+              LocaleContextHolder.getLocale()));
+    }
+
+    // 更新状态为 READY
+    episodeMapper.updateDownloadStatusAndClearSchedulingFields(episodeId,
+        EpisodeStatus.READY.name());
+  }
+
+  @Transactional(readOnly = true)
+  public List<Episode> getFailedNotificationCandidates(int maxRetryAttempts, int limit) {
+    if (limit <= 0) {
+      return Collections.emptyList();
+    }
+    return episodeMapper.selectFailedNotificationCandidates(maxRetryAttempts, limit);
+  }
+
+  @Transactional
+  public void markFailureNotificationSent(List<String> episodeIds, LocalDateTime notifiedAt) {
+    if (episodeIds == null || episodeIds.isEmpty() || notifiedAt == null) {
+      return;
+    }
+    episodeMapper.updateFailureNotifiedAt(episodeIds, notifiedAt);
+  }
+
+  @Transactional
+  public void batchProcessEpisodes(EpisodeBatchAction action, EpisodeStatus status,
+      List<String> episodeIds) {
+    EpisodeStatus targetStatus = getTargetStatus(action, status);
+
+    List<String> targetIds = new ArrayList<>();
+    if (episodeIds != null && !episodeIds.isEmpty()) {
+      targetIds.addAll(episodeIds);
+    } else {
+      LambdaQueryWrapper<Episode> wrapper = new LambdaQueryWrapper<>();
+      wrapper.eq(Episode::getDownloadStatus, targetStatus.name());
+      List<Episode> episodes = episodeMapper.selectList(wrapper);
+      if (episodes != null && !episodes.isEmpty()) {
+        targetIds = episodes.stream().map(Episode::getId).toList();
+      }
+    }
+
+    if (targetIds.isEmpty()) {
+      return;
+    }
+
+    for (String episodeId : targetIds) {
+      switch (action) {
+        case CANCEL -> cancelPendingEpisode(episodeId);
+        case DELETE -> deleteEpisodeById(episodeId);
+        case RETRY -> retryEpisode(episodeId);
+        case DOWNLOAD -> manualDownloadEpisode(episodeId);
+      }
+    }
+  }
+
+  private static EpisodeStatus getTargetStatus(EpisodeBatchAction action, EpisodeStatus status) {
+    if (action == null) {
+      throw new BusinessException("Invalid batch action");
+    }
+
+    EpisodeStatus targetStatus = getEpisodeStatus(action, status);
+
+    if (action == EpisodeBatchAction.RETRY && targetStatus != EpisodeStatus.FAILED) {
+      throw new BusinessException("Retry operation only supports failed episodes");
+    }
+
+    if (action == EpisodeBatchAction.DELETE
+        && targetStatus != EpisodeStatus.COMPLETED
+        && targetStatus != EpisodeStatus.FAILED) {
+      throw new BusinessException("Delete operation only supports completed or failed episodes");
+    }
+
+    if (action == EpisodeBatchAction.CANCEL && targetStatus != EpisodeStatus.PENDING) {
+      throw new BusinessException("Cancel operation only supports pending episodes");
+    }
+    if (action == EpisodeBatchAction.DOWNLOAD && targetStatus != EpisodeStatus.READY) {
+      throw new BusinessException("Download operation only supports ready episodes");
+    }
+    return targetStatus;
+  }
+
+  private static EpisodeStatus getEpisodeStatus(EpisodeBatchAction action, EpisodeStatus status) {
+    EpisodeStatus expectedStatus = switch (action) {
+      case CANCEL -> EpisodeStatus.PENDING;
+      case DELETE -> EpisodeStatus.COMPLETED;
+      case RETRY -> EpisodeStatus.FAILED;
+      case DOWNLOAD -> EpisodeStatus.READY;
+    };
+
+    return status != null ? status : expectedStatus;
+  }
+}

@@ -1,0 +1,1 @@
+ALTER TABLE user ADD COLUMN cookies_content TEXT default NULL;
