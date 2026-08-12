@@ -4,7 +4,7 @@ import com.google.api.client.googleapis.GoogleUtils;
 import com.google.api.client.googleapis.javanet.GoogleNetHttpTransport;
 import com.google.api.client.http.HttpRequestInitializer;
 import com.google.api.client.http.javanet.NetHttpTransport;
-import com.google.api.client.json.jackson2.JacksonFactory;
+import com.google.api.client.json.gson.GsonFactory;
 import com.google.api.services.youtube.YouTube;
 import java.io.IOException;
 import java.security.GeneralSecurityException;
@@ -20,7 +20,7 @@ public class YoutubeServiceFactory {
   private static final String APPLICATION_NAME = "PigeonPod";
   private static final int DEFAULT_CONNECT_TIMEOUT_MS = 15_000;
   private static final int DEFAULT_READ_TIMEOUT_MS = 45_000;
-  private static final JacksonFactory JSON_FACTORY = JacksonFactory.getDefaultInstance();
+  private static final GsonFactory JSON_FACTORY = GsonFactory.getDefaultInstance();
 
   private final OutboundProxyHolder proxyHolder;
 
