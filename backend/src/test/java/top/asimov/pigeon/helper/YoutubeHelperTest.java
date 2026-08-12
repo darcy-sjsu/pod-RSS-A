@@ -46,4 +46,13 @@ class YoutubeHelperTest {
     assertEquals("LegacyUser",
         youtubeHelper.getUsernameFromUrl("https://www.youtube.com/user/LegacyUser/videos"));
   }
+
+  @Test
+  void extractsCurrentVideoUrlVariants() {
+    assertEquals("dQw4w9WgXcQ",
+        youtubeHelper.extractYoutubeVideoId("https://www.youtube.com/live/dQw4w9WgXcQ?feature=share"));
+    assertEquals("dQw4w9WgXcQ",
+        youtubeHelper.extractYoutubeVideoId("https://www.youtube.com/embed/dQw4w9WgXcQ"));
+    assertEquals("dQw4w9WgXcQ", youtubeHelper.extractYoutubeVideoId("dQw4w9WgXcQ"));
+  }
 }

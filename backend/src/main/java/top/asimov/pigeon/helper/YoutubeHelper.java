@@ -89,10 +89,12 @@ public class YoutubeHelper {
       return normalizeVideoId(candidate);
     }
 
-    if (trimmed.contains("/shorts/")) {
-      int markerIndex = trimmed.indexOf("/shorts/");
-      String candidate = trimmed.substring(markerIndex + "/shorts/".length());
-      return normalizeVideoId(candidate);
+    for (String pathMarker : List.of("/shorts/", "/live/", "/embed/")) {
+      if (trimmed.contains(pathMarker)) {
+        int markerIndex = trimmed.indexOf(pathMarker);
+        String candidate = trimmed.substring(markerIndex + pathMarker.length());
+        return normalizeVideoId(candidate);
+      }
     }
 
     if (trimmed.contains("v=")) {

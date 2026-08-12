@@ -1,6 +1,7 @@
 package top.asimov.pigeon.service;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
 import static org.mockito.Mockito.never;
@@ -16,6 +17,7 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.context.ApplicationEventPublisher;
 import org.springframework.context.MessageSource;
 import top.asimov.pigeon.config.AppBaseUrlResolver;
+import top.asimov.pigeon.exception.BusinessException;
 import top.asimov.pigeon.helper.YoutubeChannelHelper;
 import top.asimov.pigeon.helper.YoutubeHelper;
 import top.asimov.pigeon.mapper.ChannelMapper;
@@ -109,5 +111,18 @@ class ChannelServiceTest {
     verify(youtubeChannelHelper).fetchYoutubeChannelVideos(
         "channel", Integer.MAX_VALUE, "last-synchronized",
         null, null, null, null, null, null);
+  }
+
+  @Test
+  void rejectsDuplicateChannelSubscription() {
+    Channel channel = Channel.builder()
+        .id("channel")
+        .title("Channel")
+        .autoDownloadEnabled(Boolean.FALSE)
+        .build();
+    when(channelMapper.selectById("channel")).thenReturn(channel);
+
+    assertThrows(BusinessException.class, () -> channelService.saveChannel(channel));
+    verify(channelMapper, never()).insert(channel);
   }
 }

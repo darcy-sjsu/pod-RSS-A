@@ -147,7 +147,9 @@ public class FeedService {
 
   private FeedType guessFeedType(String source) {
     String normalized = source == null ? "" : source.trim().toLowerCase();
-    if (normalized.contains("youtu.be/") || normalized.contains("/shorts/")
+    if (normalized.matches("[a-z0-9_-]{11}")
+        || normalized.contains("youtu.be/") || normalized.contains("/shorts/")
+        || normalized.contains("/live/") || normalized.contains("/embed/")
         || (normalized.contains("watch?v=") && !normalized.contains("list="))) {
       return FeedType.PLAYLIST;
     }

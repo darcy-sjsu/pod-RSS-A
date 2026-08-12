@@ -114,6 +114,15 @@ public abstract class AbstractFeedService<F extends Feed> {
 
   @Transactional
   public FeedSaveResult<F> saveFeed(F feed) {
+    if (feed == null || feed.getId() == null) {
+      throw new BusinessException(messageSource()
+          .getMessage("feed.source.url.missing", null, LocaleContextHolder.getLocale()));
+    }
+    if (findFeedById(feed.getId()).isPresent()) {
+      throw new BusinessException(messageSource()
+          .getMessage("feed.already.exists", new Object[]{feed.getTitle()},
+              LocaleContextHolder.getLocale()));
+    }
     if (feed.getAutoDownloadEnabled() == null) {
       feed.setAutoDownloadEnabled(Boolean.TRUE);
     }
