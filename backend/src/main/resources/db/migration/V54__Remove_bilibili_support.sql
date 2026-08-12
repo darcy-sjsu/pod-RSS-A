@@ -4,6 +4,18 @@
 -- scheduler, failing on every sync. Purge them so no orphaned feeds remain.
 
 -- Episodes owned by a Bilibili channel.
+-- Keep shared episodes that are still referenced by a surviving playlist. Detach
+-- them from the channel before deleting Bilibili-owned episode rows so the
+-- surviving playlist mapping does not become orphaned.
+UPDATE episode
+SET channel_id = NULL
+WHERE channel_id IN (SELECT id FROM channel WHERE UPPER(source) = 'BILIBILI')
+  AND EXISTS (SELECT 1
+              FROM playlist_episode pe
+              JOIN playlist p ON p.id = pe.playlist_id
+              WHERE pe.episode_id = episode.id
+                AND UPPER(p.source) <> 'BILIBILI');
+
 DELETE FROM episode
 WHERE channel_id IN (SELECT id FROM channel WHERE UPPER(source) = 'BILIBILI');
 
@@ -26,5 +38,11 @@ WHERE playlist_id IN (SELECT id FROM playlist WHERE UPPER(source) = 'BILIBILI');
 DELETE FROM channel WHERE UPPER(source) = 'BILIBILI';
 
 DELETE FROM playlist WHERE UPPER(source) = 'BILIBILI';
+
+-- Normalize surviving YouTube rows so quota checks and cookie selection use the
+-- same source value after the application becomes YouTube-only.
+UPDATE channel SET source = 'YOUTUBE' WHERE UPPER(source) = 'YOUTUBE';
+
+UPDATE playlist SET source = 'YOUTUBE' WHERE UPPER(source) = 'YOUTUBE';
 
 DELETE FROM cookie_config WHERE UPPER(platform) = 'BILIBILI';

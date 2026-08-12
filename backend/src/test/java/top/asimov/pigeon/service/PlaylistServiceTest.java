@@ -89,8 +89,8 @@ class PlaylistServiceTest {
         Runnable::run,
         appBaseUrlResolver);
     when(messageSource.getMessage(any(), any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
-    when(playlistMapper.updateById(any(Playlist.class))).thenReturn(1);
-    when(playlistEpisodeMapper.selectMappingsByPlaylistId("pl")).thenReturn(Collections.emptyList());
+    lenient().when(playlistMapper.updateById(any(Playlist.class))).thenReturn(1);
+    lenient().when(playlistEpisodeMapper.selectMappingsByPlaylistId("pl")).thenReturn(Collections.emptyList());
     lenient().when(playlistEpisodeMapper.insertMapping(any(), any(), any(), any(), any(), any(), any())).thenReturn(1);
     lenient().when(playlistEpisodeMapper.updateMapping(any(), any(), any(), any(), any(), any(), any())).thenReturn(1);
     lenient().doAnswer(invocation -> null).when(youtubeVideoHelper).applyThumbnails(any(), any());
@@ -231,6 +231,18 @@ class PlaylistServiceTest {
     playlistService.refreshPlaylistById("pl");
 
     verify(playlistEpisodeMapper).insertMapping(eq("pl"), eq("v1"), eq(0L), any(), any(), any(), any());
+  }
+
+  @Test
+  void normalizesSourceWhenSavingYoutubePlaylist() {
+    Playlist playlist = youtubePlaylist();
+    playlist.setSource("bilibili");
+    playlist.setAutoDownloadEnabled(Boolean.FALSE);
+
+    playlistService.savePlaylist(playlist);
+
+    assertEquals(FeedSource.YOUTUBE.name(), playlist.getSource());
+    verify(playlistMapper).insert(playlist);
   }
 
   private Playlist youtubePlaylist() {

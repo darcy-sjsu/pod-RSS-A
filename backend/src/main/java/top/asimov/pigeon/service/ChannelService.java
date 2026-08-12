@@ -215,6 +215,7 @@ public class ChannelService extends AbstractFeedService<Channel> {
    */
   @Transactional
   public FeedSaveResult<Channel> saveChannel(Channel channel) {
+    channel.setSource(FeedSource.YOUTUBE.name());
     feedDefaultsService().applyDefaultsIfMissing(channel);
     return saveFeed(channel);
   }

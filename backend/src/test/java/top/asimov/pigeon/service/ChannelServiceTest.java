@@ -1,0 +1,75 @@
+package top.asimov.pigeon.service;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.context.ApplicationEventPublisher;
+import org.springframework.context.MessageSource;
+import top.asimov.pigeon.config.AppBaseUrlResolver;
+import top.asimov.pigeon.helper.YoutubeChannelHelper;
+import top.asimov.pigeon.helper.YoutubeHelper;
+import top.asimov.pigeon.mapper.ChannelMapper;
+import top.asimov.pigeon.model.entity.Channel;
+import top.asimov.pigeon.model.enums.FeedSource;
+
+@ExtendWith(MockitoExtension.class)
+class ChannelServiceTest {
+
+  @Mock
+  private ChannelMapper channelMapper;
+  @Mock
+  private EpisodeService episodeService;
+  @Mock
+  private ApplicationEventPublisher eventPublisher;
+  @Mock
+  private YoutubeHelper youtubeHelper;
+  @Mock
+  private YoutubeChannelHelper youtubeChannelHelper;
+  @Mock
+  private AccountService accountService;
+  @Mock
+  private MessageSource messageSource;
+  @Mock
+  private FeedDefaultsService feedDefaultsService;
+  @Mock
+  private AppBaseUrlResolver appBaseUrlResolver;
+
+  private ChannelService channelService;
+
+  @BeforeEach
+  void setUp() {
+    channelService = new ChannelService(
+        channelMapper,
+        episodeService,
+        eventPublisher,
+        youtubeHelper,
+        youtubeChannelHelper,
+        accountService,
+        messageSource,
+        feedDefaultsService,
+        appBaseUrlResolver);
+    when(messageSource.getMessage(any(), any(), any())).thenAnswer(invocation -> invocation.getArgument(0));
+  }
+
+  @Test
+  void normalizesSourceWhenSavingYoutubeChannel() {
+    Channel channel = Channel.builder()
+        .id("channel")
+        .title("Channel")
+        .source("bilibili")
+        .autoDownloadEnabled(Boolean.FALSE)
+        .build();
+
+    channelService.saveChannel(channel);
+
+    assertEquals(FeedSource.YOUTUBE.name(), channel.getSource());
+    verify(channelMapper).insert(channel);
+  }
+}
