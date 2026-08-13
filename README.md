@@ -1,49 +1,47 @@
 # PigeonPod
 
-[简体中文](README-ZH.md)
+自托管的 YouTube 转播客桥接服务。可将 YouTube 频道与播放列表转换为标准 RSS，并按规则自动同步与下载。
 
-Self-hosted YouTube to podcast bridge. Convert YouTube channels and playlists into standard RSS feeds, with automatic sync and download.
+## 技术栈
 
-## Tech Stack
+### 后端
+- **Java 17** - 核心语言
+- **Spring Boot 3.5** - 应用框架
+- **MyBatis-Plus 3.5** - ORM 框架
+- **Sa-Token** - 认证框架
+- **SQLite** - 轻量数据库
+- **Flyway** - 数据库迁移工具
+- **YouTube Data API v3** - YouTube 数据获取
+- **yt-dlp** - 视频下载工具
+- **Rome** - RSS 生成库
 
-### Backend
-- **Java 17** - Core language
-- **Spring Boot 3.5** - Application framework
-- **MyBatis-Plus 3.5** - ORM framework
-- **Sa-Token** - Authentication framework
-- **SQLite** - Lightweight database
-- **Flyway** - Database migration tool
-- **YouTube Data API v3** - YouTube data retrieval
-- **yt-dlp** - Video download tool
-- **Rome** - RSS generation library
+### 前端
+- **Javascript (ES2024)** - 核心语言
+- **React 19** - 应用框架
+- **Vite 7** - 构建工具
+- **Mantine 8** - UI 组件库
+- **i18next** - 国际化
+- **Axios** - HTTP 客户端
 
-### Frontend
-- **Javascript (ES2024)** - Core language
-- **React 19** - Application framework
-- **Vite 7** - Build tool
-- **Mantine 8** - UI component library
-- **i18next** - Internationalization support
-- **Axios** - HTTP client
+## 环境依赖
 
-## Environment Requirements
-
-- Docker and Docker Compose (recommended for deployment)
-- Or for JAR / local development:
+- Docker 与 Docker Compose（推荐部署方式）
+- 或使用 JAR / 本地开发时需要：
   - Java 17+
   - Node.js 22+
   - Maven 3.9+
   - SQLite
   - yt-dlp
   - FFmpeg
-  - Deno 2.3+ (required by current yt-dlp YouTube extraction)
+  - Deno 2.3+（当前 yt-dlp YouTube 提取所需）
 
-## Deployment
+## 部署
 
-### Using Docker Compose (Recommended)
+### 使用 Docker Compose（推荐）
 
-**Make sure you have Docker and Docker Compose installed on your machine.**
+**请先在本机安装 Docker 与 Docker Compose。**
 
-1. Use the docker-compose configuration file, modify environment variables according to your needs
+1. 使用如下 docker-compose 配置，并按需修改环境变量
 ```yml
 services:
   pigeon-pod:
@@ -72,63 +70,62 @@ volumes:
 ```
 
 > [!WARNING]
-> `PIGEON_AUTH_ENABLED` defaults to `true`. Set it to `false` only if another trusted layer already protects the web UI, such as an auth proxy, reverse proxy access control, VPN, or private network.
+> `PIGEON_AUTH_ENABLED` 默认值为 `true`。只有在已有其他可信保护层守护 Web UI 时，例如 auth proxy、反向代理访问控制、VPN 或私有网络，才应将其设置为 `false`。
 >
-> If you disable built-in auth, you must secure PigeonPod by other means. Do not expose an auth-disabled instance directly to the public Internet.
+> 如果关闭内置认证，必须通过其他方式保护 PigeonPod。不要将关闭认证的实例直接暴露在公网。
 
-2. Start the service
+2. 启动服务
 ```bash
 docker-compose up -d
 ```
 
-3. Access the application
-Open your browser and visit `http://localhost:8834` with **default username: `root` and default password: `Root@123`**
+3. 访问应用
+浏览器打开 `http://localhost:8834`，默认用户名：`root`，默认密码：`Root@123`
 
-### Run with JAR
+### 使用 JAR 运行
 
-**Make sure you have Java 17+, yt-dlp, FFmpeg, and Deno 2.3+ installed on your machine.**
+**请先在本机安装 Java 17+、yt-dlp、FFmpeg 与 Deno 2.3+。**
 
-For current YouTube playback restrictions, install a supported PO Token provider plugin and
-configure `PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL` when using an HTTP provider.
+针对当前 YouTube 播放限制，请安装受支持的 PO Token provider 插件；使用 HTTP provider 时需配置 `PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL`。
 
-1. Build the JAR from source, see [Local Development](#local-development)
+1. 从源码构建 JAR，参见 [本地开发](#本地开发)
 
-2. Create data directory in the same directory as the JAR file.
+2. 在 JAR 同级目录创建 data 目录
 ```bash
 mkdir -p data
 ```
 
-3. Run the application
+3. 运行应用
 ```bash
 java -jar -Dspring.datasource.url=jdbc:sqlite:/path/to/your/pigeon-pod.db \  # set to your database path
            pigeon-pod-x.x.x.jar
 ```
 
-4. Access the application
-Open your browser and visit `http://localhost:8080` with **default username: `root` and default password: `Root@123`**
+4. 访问应用
+浏览器打开 `http://localhost:8080`，默认用户名：`root`，默认密码：`Root@123`
 
-## Storage Configuration
+## 存储配置
 
-- PigeonPod supports `LOCAL` and `S3` storage modes.
-- You can only enable one mode at a time.
-- S3 mode supports MinIO, Cloudflare R2, AWS S3, and other S3-compatible services.
-- Switching storage mode does not migrate historical media automatically. You must migrate files manually.
+- PigeonPod 支持 `LOCAL` 与 `S3` 两种存储模式。
+- 同一时间只能启用一种模式。
+- S3 模式支持 MinIO、Cloudflare R2、AWS S3 及其他 S3 兼容服务。
+- 切换存储模式不会自动迁移历史媒体文件，需要手动迁移。
 
-### Storage Quick Comparison
+### 存储方式对比
 
-| Mode | Pros | Cons |
+| 模式 | 优点 | 缺点 |
 | --- | --- | --- |
-| `LOCAL` | Easy setup, no external dependency | Uses local disk, harder to scale |
-| `S3` | Better scalability, suitable for cloud deployment | Requires object storage setup and credentials |
+| `LOCAL` | 配置简单，无外部依赖 | 占用本地磁盘，扩展较难 |
+| `S3` | 扩展性更好，适合云部署 | 需要对象存储与凭据配置 |
 
-## Local Development
+## 本地开发
 
-1. Enter the project directory
+1. 进入项目目录
 ```bash
 cd pigeon-pod
 ```
 
-2. Configure database
+2. 配置数据库与存储路径
 ```bash
 # Create data directory
 mkdir -p data/audio data/video data/cover
@@ -141,34 +138,34 @@ export PIGEON_COVER_FILE_PATH="$PWD/data/cover/"
 # Database file will be created automatically on first startup
 ```
 
-3. Configure YouTube API
-   - Create a project in [Google Cloud Console](https://console.cloud.google.com/)
-   - Enable YouTube Data API v3
-   - Create an API key
-   - Configure the API key in user settings
+3. 配置 YouTube API
+   - 在 [Google Cloud Console](https://console.cloud.google.com/) 创建项目
+   - 启用 YouTube Data API v3
+   - 创建 API key
+   - 在用户设置中配置该 API key
 
-4. Start backend
+4. 启动后端
 ```bash
 cd backend
 mvn spring-boot:run
 ```
 
-5. Start frontend (new terminal)
+5. 启动前端（新终端）
 ```bash
 cd frontend
 npm install
 npm run dev
 ```
 
-6. Access the application
-- Frontend dev server: `http://localhost:5173`
-- Backend API: `http://localhost:8080`
+6. 访问应用
+- 前端开发服务器：`http://localhost:5173`
+- 后端 API：`http://localhost:8080`
 
-## Notes
+## 注意事项
 
-1. Ensure yt-dlp is installed and available in the command line
-2. Configure a valid YouTube API key
-3. Ensure the audio/video storage directory has sufficient disk space
-4. Regularly clean up old media files to save space
-5. Docker Compose is the recommended deployment method
-6. Design and architecture documents live in `dev-docs/`
+1. 确保 yt-dlp 已安装且可在命令行中调用
+2. 配置正确的 YouTube API key
+3. 确保存储目录有足够磁盘空间
+4. 定期清理旧媒体文件以节省空间
+5. 推荐使用 Docker Compose 部署
+6. 更详细的设计与架构文档见仓库中的 `dev-docs/`
