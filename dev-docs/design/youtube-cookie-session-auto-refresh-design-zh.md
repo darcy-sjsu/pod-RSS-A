@@ -1,11 +1,14 @@
 # PigeonPod YouTube Cookie 会话自动续期设计方案
 
+> **实施状态**：Phase 0、Phase 1、Phase 2 已全部落地（见第 16 节）。Phase 3（浏览器网页登录）仍为可选项，未实现。
+> 落地过程中相对本文的偏差与新增约束记录在第 19 节。
+
 ## 1. Requirement Summary
 
 - User request:
   - 为 yt-dlp 增加“跳转网页 → 用 Google 账号登录 youtube.com”的入口。
   - 核心目标是“按时间间隔自动获取 YouTube 网页里的 Cookies 并自动更新”，让 yt-dlp 始终使用不断更新的 YouTube Cookies。
-  - 本期只输出实施方案，不写代码。
+  - 本文先输出实施方案，Phase 0/1/2 随后按本方案实现。
 - Requirement type:
   - `enhancement`
 - Assumptions:
@@ -537,7 +540,9 @@ Phase 1 只提供手动 `refresh` 与诊断返回，用于验证第 18 节的假
 
 ## 16. 交付计划
 
-### 16.1 Phase 0（零风险，先做）
+Phase 0 / 1 / 2 已实现，Phase 3 与 Later 仍未开始。
+
+### 16.1 Phase 0（零风险，先做）— 已实现
 
 1. `NetscapeCookieFile` 工具与单测。
 2. yt-dlp 回写合并闭环（L0）与读写锁。
@@ -547,20 +552,20 @@ Phase 1 只提供手动 `refresh` 与诊断返回，用于验证第 18 节的假
 
 Phase 0 不依赖任何未验证的外部行为：它消除的是“每次下载都用一份越来越旧的快照”这个确定存在的退化来源，并让会话状态第一次变得可观测。即使后续 L1 被证明不可行，这部分收益依然成立。
 
-### 16.2 Phase 1（验证私有端点）
+### 16.2 Phase 1（验证私有端点）— 已实现
 
 1. `YoutubeCookieRotator` + `POST /api/cookies/{platform}/refresh` 手动触发与诊断返回。
 2. 代理复用与 UA 对齐。
 3. 用真实账号验证第 18 节假设。
 
-### 16.3 Phase 2（自动化）
+### 16.3 Phase 2（自动化）— 已实现
 
 1. `CookieSessionScheduler` 定时续期、退避、限流。
 2. 失效通知。
 3. 自动续期开关与深度校验接口。
 4. 上传引导文案改为官方姿势 + DBSC 提示。
 
-### 16.4 Phase 3（可选，网页登录）
+### 16.4 Phase 3（可选，网页登录）— 未实现
 
 1. profile 化浏览器 sidecar。
 2. CDP 导入接口与“导入后结束会话”强约束。
@@ -605,7 +610,37 @@ Phase 1 的诊断接口就是为验证这些假设而存在的：
 
 若假设 1 或 4 不成立，则 L1 不可行，方案退化为“Phase 0 的回写闭环 + 状态可观测 + 手动更新引导”，用户价值仍然为正，只是无法做到完全免手工。
 
-## 19. Decision
+## 19. 落地记录：与本方案的偏差和新增约束
+
+Phase 0 / 1 / 2 实现过程中发现了几个方案里没预见到的点，记录在这里，避免后续维护者重新踩一遍。
+
+### 19.1 回写必须"合并而不覆盖"的强度比预想更高
+
+方案第 4.10 节已经预判到这一点，实测进一步确认：yt-dlp 的回写文件在真实流量下会**整条丢掉** YouTube 清除掉的 `LOGIN_INFO` 与 `SAPISID`。因此合并规则里"缺失的名字一律视为没更新、绝不删除"是硬性约束，不是防御性冗余。这条规则由 `NetscapeCookieFileTest` 与 `CookieServiceTest` 各自覆盖。
+
+### 19.2 真实端点在凭据无效时返回 401，不是 403
+
+设计时只探测到未携带 Cookie 的 403。带上无效凭据实测返回 `401`。两者都按"拒绝"处理并计入连续失败次数，`429` 与网络失败则不计入，只做退避。
+
+### 19.3 MyBatis-Plus 默认不写回 null 字段
+
+`session_status` 之外的会话字段需要能被清空（重新上传后应清掉失败原因和排期）。MyBatis-Plus 默认的更新策略会跳过 null 字段，导致清空操作静默失效。`lastRotatedAt`、`nextRotateAt`、`lastCheckedAt`、`lastFailureReason` 因此标注了 `@TableField(updateStrategy = FieldStrategy.ALWAYS)`，并由一个反射断言守住。
+
+### 19.4 `HttpURLConnection` 会静默丢弃 `Origin` 头
+
+`Origin` 属于 JDK 的受限请求头，`SimpleClientHttpRequestFactory` 底层的 `HttpURLConnection` 会直接丢掉它。因此续期请求默认改用 JDK `HttpClient`（`JdkClientHttpRequestFactory`），只有配置了 SOCKS5 代理时才退回旧客户端——代价是那种情况下 `Origin` 仍然发不出去。这个取舍写在 `YoutubeCookieRotator.buildRestClient()` 的注释里。
+
+### 19.5 失效警告要扫全量输出，不能只看 tail
+
+`ProcessExecutionResult.outputTail()` 只保留输出尾部，而这句警告出现在元数据提取阶段，一次大文件下载足以把它挤出缓冲区。检测改为扫描完整的进程输出日志文件。
+
+### 19.6 尚未实现的方案条目
+
+- `RotateCookiesPage` 提取初值的回退路径没有实现。当前只走直接 POST，端点与请求体是配置项，真机验证发现哑请求体被拒时再补。
+- Phase 3 的浏览器 sidecar 登录未实现。
+- 第 18 节的 7 条假设仍需持有真实账号的人验证：成功路径目前是对照真实响应结构的本地 stub 验证的，失败路径与失效检测则已在真实流量上验证过。
+
+## 20. Decision
 
 - Recommendation:
   - Proceed with constraints

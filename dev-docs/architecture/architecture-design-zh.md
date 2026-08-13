@@ -24,6 +24,7 @@ PigeonPod 是一个自托管的 YouTube 到 Podcast 桥接系统，目标是：
   - 章节流：`/media/{episodeId}/chapters.json`
   - RSS：频道/播放列表均支持，并带 API Key 校验。
 - 设置中心：账号管理、API Key、YouTube API Key、Cookies、日期格式、登录验证码开关、yt-dlp 参数白名单策略、Feed 默认配置、yt-dlp 运行时升级、OPML 导出、失败任务通知（SMTP Email / Generic Webhook Plus）。
+- Cookie 会话托管：后端按 YouTube 声明的间隔自动续期平台 Cookie，合并 yt-dlp 回写的刷新结果，识别失效并在设置页展示会话状态。
 - 前端能力：全局播放器（音频底栏 + 视频弹窗）、Dashboard 状态面板、分页与懒加载、状态轮询、8 语言国际化。
 
 ## 3. 技术栈与版本
@@ -60,6 +61,7 @@ PigeonPod 是一个自托管的 YouTube 到 Podcast 桥接系统，目标是：
 - 剧集：`/api/episode/**`（分页、重试、手动下载、取消、批量、下载到本地）
 - 看板：`/api/dashboard/statistics`、`/api/dashboard/episodes`
 - 账号：`/api/account/**`（账号、默认配置、yt-dlp、OPML 等）
+- Cookie：`/api/cookies/**`（上传、删除、状态摘要、立即续期、登录态校验、自动续期开关）
 - 通知：`/api/notification/**`（通知配置、SMTP/Webhook 测试发送）
 - RSS：`/api/rss/**`（`@SaCheckApiKey`）
 - 媒体：`/media/**`
@@ -89,6 +91,7 @@ PigeonPod 是一个自托管的 YouTube 到 Podcast 桥接系统，目标是：
 - `PlaylistSyncer`: 每 1 小时检查一次，到期 playlist 才执行同步。
 - `DownloadScheduler`: 每 30 秒，回收超时 `DOWNLOADING`，补位 PENDING/FAILED，提升延迟自动下载任务。
 - `FailedDownloadNotificationScheduler`: 每 1 小时汇总自动重试耗尽后仍失败的任务并发送通知。
+- `CookieSessionScheduler`: 每 1 分钟扫描到期的平台 Cookie 会话并续期，间隔由续期响应声明。
 - `EpisodeCleaner`: 每 2 小时，按 feed 维度清理超限 COMPLETED。
 - `StaleTaskCleaner`: 启动时将遗留 DOWNLOADING 回置为 PENDING。
 
@@ -109,7 +112,10 @@ PigeonPod 是一个自托管的 YouTube 到 Podcast 桥接系统，目标是：
   - 包含 `downloadStatus`、`downloadStartedAt`、`mediaFilePath`、`mediaType`、`retryNumber`、`nextRetryAt`、`autoDownloadAfter`、`liveVod`
 - `PlaylistEpisode`：保存播放列表关联关系与 `position`。
 - `FeedDefaults`：系统默认下载参数与字幕参数。
-- `User`：账号、API Key、YouTube API Key、Cookies、日期格式、yt-dlp 自定义参数、登录验证码开关。
+- `User`：账号、API Key、日期格式、角色。
+- `CookieConfig`：
+  - 按平台保存一份 Netscape 格式 Cookie，当前只受管 `YOUTUBE`。
+  - 会话生命周期：`sessionStatus`（`UNKNOWN/ACTIVE/STALE/INVALID`）、`autoRefreshEnabled`、`rotateIntervalSeconds`、`lastRotatedAt`、`nextRotateAt`、`lastCheckedAt`、`rotateFailureCount`、`lastFailureReason`。
 - `SystemConfig`：
   - 单例系统配置，包含基础 URL、代理、存储、YouTube Key、下载文件命名规则等系统级运行配置。
 - `NotificationConfig`：

@@ -24,6 +24,7 @@ PigeonPod is a self-hosted YouTube-to-Podcast bridge. The core goals are:
   - Chapters stream: `/media/{episodeId}/chapters.json`
   - RSS for both channel and playlist, protected by API key.
 - Settings center: account ops, API key, YouTube API key, cookies, date format, login captcha switch, yt-dlp arg policy, feed defaults, managed yt-dlp runtime update, OPML export.
+- Managed cookie session: the backend refreshes platform cookies on the interval YouTube declares, merges the refreshed jar yt-dlp writes back, detects invalidation and surfaces the session state in settings.
 - Frontend UX: global player (audio bottom bar + video modal), dashboard status board, pagination/lazy loading, status polling, 8-language i18n.
 
 ## 3. Technology Stack and Versions
@@ -60,6 +61,7 @@ PigeonPod is a self-hosted YouTube-to-Podcast bridge. The core goals are:
 - Episode: `/api/episode/**` (paging, retry, manual download, cancel, batch, download-to-local)
 - Dashboard: `/api/dashboard/statistics`, `/api/dashboard/episodes`
 - Account: `/api/account/**` (account ops, defaults, yt-dlp runtime, OPML, etc.)
+- Cookies: `/api/cookies/**` (upload, delete, session summary, on-demand refresh, sign-in verification, auto-refresh switch)
 - RSS: `/api/rss/**` (`@SaCheckApiKey` protected)
 - Media: `/media/**`
 
@@ -87,6 +89,7 @@ PigeonPod is a self-hosted YouTube-to-Podcast bridge. The core goals are:
 - `ChannelSyncer`: every 1 hour.
 - `PlaylistSyncer`: checks every 1 hour and syncs only due playlists.
 - `DownloadScheduler`: every 30 seconds, recovers timed-out `DOWNLOADING` rows, fills workers, and promotes delayed auto-download episodes.
+- `CookieSessionScheduler`: every 1 minute, refreshes platform cookie sessions that are due, on the interval the refresh response declares.
 - `EpisodeCleaner`: every 2 hours, cleanup by feed-level limits.
 - `StaleTaskCleaner`: on startup, resets stale `DOWNLOADING` rows to `PENDING`.
 
@@ -107,7 +110,10 @@ PigeonPod is a self-hosted YouTube-to-Podcast bridge. The core goals are:
   - includes `downloadStatus`, `downloadStartedAt`, `mediaFilePath`, `mediaType`, `retryNumber`, `nextRetryAt`, `autoDownloadAfter`, `liveVod`
 - `PlaylistEpisode`: stores playlist mapping and `position`.
 - `FeedDefaults`: system-level defaults for download and subtitle behavior.
-- `User`: account fields, API key, YouTube API key, cookies, date format, yt-dlp args, login captcha toggle.
+- `User`: account fields, API key, date format, role.
+- `CookieConfig`:
+  - one Netscape cookie jar per platform; only `YOUTUBE` is managed today.
+  - session lifecycle: `sessionStatus` (`UNKNOWN/ACTIVE/STALE/INVALID`), `autoRefreshEnabled`, `rotateIntervalSeconds`, `lastRotatedAt`, `nextRotateAt`, `lastCheckedAt`, `rotateFailureCount`, `lastFailureReason`.
 - `SystemConfig`: singleton system config for base URL, proxy, storage, YouTube key, and download file naming pattern.
 
 ## 7. Core Flows
