@@ -1,7 +1,12 @@
+# Local app: must be built from this repository. Do not pull a remote pigeon-pod image.
+# Dependencies such as bgutil-provider may pull public images.
 services:
   pigeon-pod:
-    build: .
-    image: pigeon-pod:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      pull: false
+    pull_policy: build
     restart: unless-stopped
     container_name: pigeon-pod
     ports:
@@ -10,12 +15,15 @@ services:
       - SPRING_DATASOURCE_URL=jdbc:sqlite:/data/pigeon-pod.db
       - PIGEON_LOG_FILE=/data/logs/pigeon-pod.log
       - PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL=http://bgutil-provider:4416
+      # Optional: disable PigeonPod built-in auth when running behind another auth layer
+      # - PIGEON_AUTH_ENABLED=false
     depends_on:
       - bgutil-provider
     volumes:
       - pigeon-pod-data:/data
 
   bgutil-provider:
+    # YouTube PO Token helper: public image is allowed.
     image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
     restart: unless-stopped
 
