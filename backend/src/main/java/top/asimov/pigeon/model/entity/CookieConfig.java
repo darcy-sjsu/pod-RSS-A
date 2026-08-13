@@ -25,4 +25,13 @@ public class CookieConfig {
   private String sourceType;
   private LocalDateTime createdAt;
   private LocalDateTime updatedAt;
+
+  private String sessionStatus;
+  private Boolean autoRefreshEnabled;
+  private Integer rotateIntervalSeconds;
+  private LocalDateTime lastRotatedAt;
+  private LocalDateTime nextRotateAt;
+  private LocalDateTime lastCheckedAt;
+  private Integer rotateFailureCount;
+  private String lastFailureReason;
 }

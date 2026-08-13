@@ -58,6 +58,18 @@ pigeon:
     po-token-provider-url: ${PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL:}
   download:
     process-timeout-minutes: 60
+  cookie:
+    refresh:
+      enabled: true
+      # Private Google endpoint. Exposed as configuration so an operator can adapt without a release.
+      rotate-url: https://accounts.youtube.com/RotateCookies
+      request-body: '[0,"-0000000000000000000"]'
+      min-interval-seconds: 60
+      default-interval-seconds: 600
+      max-interval-seconds: 3600
+      max-consecutive-failures: 3
+      request-timeout-seconds: 15
+      verify-timeout-seconds: 60
 
 sa-token:
   # Token name (also the cookie name)

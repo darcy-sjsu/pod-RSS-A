@@ -48,6 +48,7 @@ import top.asimov.pigeon.service.FeedDefaultsService;
 import top.asimov.pigeon.service.SystemConfigService;
 import top.asimov.pigeon.service.YtDlpProxyService;
 import top.asimov.pigeon.service.YtDlpRuntimeService;
+import top.asimov.pigeon.service.cookie.CookieSessionService;
 import top.asimov.pigeon.service.storage.S3StorageService;
 import top.asimov.pigeon.util.DownloadFileNamePatternUtil;
 import top.asimov.pigeon.util.EpisodeRetryPlanner;
@@ -63,6 +64,8 @@ public class DownloadHandler {
 
   private static final String SUBTITLE_DISABLED_VALUE = "__DISABLED__";
   private static final String FINAL_FILEPATH_PRINT_PREFIX = "PIGEON_FINAL_FILEPATH:";
+  private static final String COOKIE_INVALIDATION_WARNING_MARKER =
+      "The provided YouTube account cookies are no longer valid";
   private static final int MAX_FILE_NAME_SUFFIX_ATTEMPTS = 10_000;
   private static final int PROCESS_OUTPUT_TAIL_CHARS = 12_000;
 
@@ -73,6 +76,7 @@ public class DownloadHandler {
   private final Set<String> reservedOutputBaseNames = ConcurrentHashMap.newKeySet();
   private final EpisodeMapper episodeMapper;
   private final CookieService cookieService;
+  private final CookieSessionService cookieSessionService;
   private final ChannelMapper channelMapper;
   private final PlaylistMapper playlistMapper;
   private final MessageSource messageSource;
@@ -89,6 +93,7 @@ public class DownloadHandler {
   private final DownloadProcessRegistry downloadProcessRegistry;
 
   public DownloadHandler(EpisodeMapper episodeMapper, CookieService cookieService,
+      CookieSessionService cookieSessionService,
       ChannelMapper channelMapper, PlaylistMapper playlistMapper,
       MessageSource messageSource, ObjectMapper objectMapper,
       YtDlpRuntimeService ytDlpRuntimeService, FeedDefaultsService feedDefaultsService,
@@ -98,6 +103,7 @@ public class DownloadHandler {
       DownloadProperties downloadProperties, DownloadProcessRegistry downloadProcessRegistry) {
     this.episodeMapper = episodeMapper;
     this.cookieService = cookieService;
+    this.cookieSessionService = cookieSessionService;
     this.channelMapper = channelMapper;
     this.playlistMapper = playlistMapper;
     this.messageSource = messageSource;
@@ -127,6 +133,7 @@ public class DownloadHandler {
       return;
     }
 
+    CookieService.CookieSnapshot cookieSnapshot = null;
     String tempCookiesFile = null;
     String outputDirPath = null;
     OutputBaseNameReservation outputBaseNameReservation = null;
@@ -135,7 +142,8 @@ public class DownloadHandler {
     try {
       FeedContext feedContext = resolveFeedContext(episode);
       CookiePlatform cookiePlatform = CookiePlatform.fromFeedSource(feedContext.source());
-      tempCookiesFile = cookieService.createTempCookiesFile(cookiePlatform, "0");
+      cookieSnapshot = cookieService.createTempCookiesSnapshot(cookiePlatform, "0");
+      tempCookiesFile = cookieSnapshot == null ? null : cookieSnapshot.filePath();
       String feedName = feedContext.title();
       String renderedBaseName = DownloadFileNamePatternUtil.buildBaseName(
           systemConfigService.getCurrentConfig().getDownloadFileNamePattern(),
@@ -163,6 +171,9 @@ public class DownloadHandler {
       ProcessExecutionResult processResult = runProcessWithTimeout(
           processBuilder, Path.of(outputDirPath), "yt-dlp", episodeId);
       exitCode = processResult.exitCode();
+      if (processResult.cookiesInvalidated() && cookieSnapshot != null) {
+        cookieSessionService.markInvalidatedByYtDlp(cookieSnapshot.platform());
+      }
       if (StringUtils.hasText(processResult.outputTail())) {
         errorLog.append(processResult.outputTail());
       }
@@ -291,7 +302,10 @@ public class DownloadHandler {
       if (outputBaseNameReservation != null) {
         reservedOutputBaseNames.remove(outputBaseNameReservation.reservationKey());
       }
-      // 清理临时cookies文件
+      // yt-dlp 会把刷新后的 cookie jar 回写到该临时文件，先合并回库再删除
+      if (cookieSnapshot != null) {
+        cookieService.mergeYtDlpWriteBack(cookieSnapshot);
+      }
       if (tempCookiesFile != null) {
         cookieService.deleteTempCookiesFile(tempCookiesFile);
       }
@@ -602,9 +616,10 @@ public class DownloadHandler {
 
       int exitCode = process.exitValue();
       String outputTail = readLogTail(outputLog, PROCESS_OUTPUT_TAIL_CHARS);
+      boolean cookiesInvalidated = containsCookieInvalidationWarning(outputLog);
       log.debug("[yt-dlp] process finished: label={} episodeId={} exitCode={}", label, episodeId,
           exitCode);
-      return new ProcessExecutionResult(exitCode, outputTail);
+      return new ProcessExecutionResult(exitCode, outputTail, cookiesInvalidated);
     } catch (InterruptedException e) {
       if (process != null) {
         downloadProcessRegistry.terminateProcessTree(process);
@@ -620,6 +635,23 @@ public class DownloadHandler {
       } catch (IOException e) {
         log.debug("[yt-dlp] process output log cleanup failed: path={}", outputLog, e);
       }
+    }
+  }
+
+  /**
+   * yt-dlp emits this warning while extracting metadata, which is the very beginning of a run. The
+   * tail buffer would have dropped it long before a large download finishes, so the whole log is
+   * scanned instead.
+   */
+  private boolean containsCookieInvalidationWarning(Path outputLog) {
+    if (outputLog == null || !Files.exists(outputLog)) {
+      return false;
+    }
+    try (Stream<String> lines = Files.lines(outputLog, StandardCharsets.UTF_8)) {
+      return lines.anyMatch(line -> line.contains(COOKIE_INVALIDATION_WARNING_MARKER));
+    } catch (Exception e) {
+      log.debug("[yt-dlp] cookie invalidation scan failed: path={}", outputLog, e);
+      return false;
     }
   }
 
@@ -1367,7 +1399,8 @@ public class DownloadHandler {
   private record OutputBaseNameReservation(String baseName, String reservationKey) {
   }
 
-  private record ProcessExecutionResult(int exitCode, String outputTail) {
+  private record ProcessExecutionResult(int exitCode, String outputTail,
+                                        boolean cookiesInvalidated) {
   }
 
   private record LightweightMediaValidationResult(boolean valid, String message) {
