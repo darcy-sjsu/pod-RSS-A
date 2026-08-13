@@ -110,6 +110,20 @@ class NetscapeCookieFileTest {
   }
 
   @Test
+  void mergeAppendsAfterTheLastCookieRatherThanAfterATrailingNewline() {
+    NetscapeCookieFile file = NetscapeCookieFile.parse(USER_UPLOADED_FILE + "\n");
+
+    NetscapeCookieFile.MergeResult result = file.merge(
+        List.of(cookie(".google.com", "__Secure-3PSIDTS", "fresh-3psidts", NOW + 3600)),
+        NetscapeCookieFile.rotatableCookieNames(), NOW);
+
+    String[] lines = result.file().serialize().split("\n", -1);
+    assertTrue(lines[lines.length - 1].isEmpty(), "the trailing newline is preserved");
+    assertTrue(lines[lines.length - 2].contains("__Secure-3PSIDTS\tfresh-3psidts"));
+    assertFalse(result.file().serialize().contains("\n\n#HttpOnly_.google.com"));
+  }
+
+  @Test
   void mergeIgnoresCookiesOutsideTheRotatableWhitelist() {
     NetscapeCookieFile file = NetscapeCookieFile.parse(USER_UPLOADED_FILE);
 

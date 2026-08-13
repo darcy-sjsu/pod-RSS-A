@@ -2,8 +2,11 @@ package top.asimov.pigeon.service.cookie;
 
 import java.io.IOException;
 import java.io.InputStream;
+import java.net.InetSocketAddress;
 import java.net.Proxy;
+import java.net.ProxySelector;
 import java.net.URI;
+import java.net.http.HttpClient;
 import java.nio.charset.StandardCharsets;
 import java.time.Duration;
 import java.util.List;
@@ -11,12 +14,14 @@ import java.util.regex.Matcher;
 import java.util.regex.Pattern;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.http.MediaType;
+import org.springframework.http.client.JdkClientHttpRequestFactory;
 import org.springframework.http.client.SimpleClientHttpRequestFactory;
 import org.springframework.stereotype.Component;
 import org.springframework.util.StreamUtils;
 import org.springframework.web.client.RestClient;
 import top.asimov.pigeon.config.CookieRefreshProperties;
 import top.asimov.pigeon.config.OutboundProxyHolder;
+import top.asimov.pigeon.model.enums.ProxyType;
 import top.asimov.pigeon.util.NetscapeCookie;
 import top.asimov.pigeon.util.SetCookieParser;
 
@@ -72,18 +77,38 @@ public class YoutubeCookieRotator {
   }
 
   /**
-   * Uses {@link SimpleClientHttpRequestFactory} rather than the JDK HTTP client because the latter
-   * cannot route through a SOCKS5 proxy, and the rotation must leave from the same address as the
-   * yt-dlp downloads.
+   * The request must leave from the same address as the yt-dlp downloads, otherwise Google sees the
+   * session active from two networks at once. That constrains the HTTP client:
+   *
+   * <ul>
+   *   <li>the JDK client is preferred because {@code HttpURLConnection} silently drops
+   *       {@code Origin}, which is one of its restricted headers;
+   *   <li>but it cannot route through SOCKS5, so a SOCKS proxy falls back to the older client and
+   *       gives up the {@code Origin} header.
+   * </ul>
    */
   private RestClient buildRestClient() {
-    SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
-    Proxy proxy = outboundProxyHolder.current().toJavaNetProxy();
-    if (proxy != null && proxy != Proxy.NO_PROXY) {
-      requestFactory.setProxy(proxy);
-    }
+    OutboundProxyHolder.OutboundProxySettings proxySettings = outboundProxyHolder.current();
     Duration timeout = Duration.ofSeconds(Math.max(1, properties.getRequestTimeoutSeconds()));
-    requestFactory.setConnectTimeout(timeout);
+
+    if (proxySettings.enabled() && proxySettings.type() == ProxyType.SOCKS5) {
+      SimpleClientHttpRequestFactory requestFactory = new SimpleClientHttpRequestFactory();
+      Proxy proxy = proxySettings.toJavaNetProxy();
+      if (proxy != Proxy.NO_PROXY) {
+        requestFactory.setProxy(proxy);
+      }
+      requestFactory.setConnectTimeout(timeout);
+      requestFactory.setReadTimeout(timeout);
+      return RestClient.builder().requestFactory(requestFactory).build();
+    }
+
+    HttpClient.Builder httpClientBuilder = HttpClient.newBuilder().connectTimeout(timeout);
+    Proxy proxy = proxySettings.toJavaNetProxy();
+    if (proxy != Proxy.NO_PROXY && proxy.address() instanceof InetSocketAddress address) {
+      httpClientBuilder.proxy(ProxySelector.of(address));
+    }
+    JdkClientHttpRequestFactory requestFactory =
+        new JdkClientHttpRequestFactory(httpClientBuilder.build());
     requestFactory.setReadTimeout(timeout);
     return RestClient.builder().requestFactory(requestFactory).build();
   }

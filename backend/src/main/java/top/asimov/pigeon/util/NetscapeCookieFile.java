@@ -145,7 +145,9 @@ public final class NetscapeCookieFile {
       }
 
       if (!matchedExisting) {
-        merged.add(Entry.cookie(candidate));
+        // Insert right after the last cookie rather than at the very end, so a file that ends with
+        // a trailing newline does not grow a blank line in the middle of the cookie block.
+        merged.add(lastCookieIndex(merged) + 1, Entry.cookie(candidate));
         updatedNames.add(candidate.name());
         updatedDomains.add(candidate.domain());
       }
@@ -155,6 +157,15 @@ public final class NetscapeCookieFile {
     NetscapeCookieFile mergedFile = changed ? new NetscapeCookieFile(merged) : this;
     return new MergeResult(mergedFile, List.copyOf(updatedNames), List.copyOf(updatedDomains),
         List.copyOf(rejectedNames), changed);
+  }
+
+  private static int lastCookieIndex(List<Entry> entries) {
+    for (int i = entries.size() - 1; i >= 0; i--) {
+      if (entries.get(i).isCookie()) {
+        return i;
+      }
+    }
+    return entries.size() - 1;
   }
 
   private NetscapeCookie findPreferred(String name) {
