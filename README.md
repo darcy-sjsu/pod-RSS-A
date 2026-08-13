@@ -68,7 +68,7 @@ services:
     restart: unless-stopped
     container_name: pod-RSS-A
     ports:
-      - '8834:8080'
+      - '8586:8080'
     environment:
       - SPRING_DATASOURCE_URL=jdbc:sqlite:/data/pigeon-pod.db # set to your database path
       - PIGEON_LOG_FILE=/data/logs/pigeon-pod.log
@@ -100,7 +100,7 @@ docker compose up -d --build
 ```
 
 4. 访问应用
-浏览器打开 `http://localhost:8834`，默认用户名：`root`，默认密码：`Root@123`
+浏览器打开 `http://localhost:8586`，默认用户名：`root`，默认密码：`Root@123`
 
 ### 使用 JAR 运行
 
