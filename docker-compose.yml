@@ -15,10 +15,6 @@ services:
       - SPRING_DATASOURCE_URL=jdbc:sqlite:/data/pigeon-pod.db
       - PIGEON_LOG_FILE=/data/logs/pigeon-pod.log
       - PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL=http://bgutil-provider:4416
-      # Distinct Sa-Token cookie name so this instance doesn't share/overwrite
-      # the browser cookie with another PigeonPod instance (e.g. upstream pigeon-pod)
-      # running on the same host at a different port.
-      - SA_TOKEN_TOKEN_NAME=podrssa
       # Optional: disable PigeonPod built-in auth when running behind another auth layer
       # - PIGEON_AUTH_ENABLED=false
     depends_on:

@@ -72,8 +72,10 @@ pigeon:
       verify-timeout-seconds: 60
 
 sa-token:
-  # Token name (also the cookie name)
-  token-name: pigeonpod
+  # Token name (also the cookie name). Distinct from upstream pigeon-pod's
+  # default so both can run on the same host at different ports without
+  # their auth cookies colliding (browsers scope cookies by host, not port).
+  token-name: podrssa
   # Token validity period (seconds), default is 30 days, -1 means permanent
   timeout: 2592000
   # Token minimum active frequency (seconds), if token is not used within this time it will be frozen, default -1 means no limit
