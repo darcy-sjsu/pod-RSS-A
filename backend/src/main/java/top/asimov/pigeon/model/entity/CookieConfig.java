@@ -1,6 +1,8 @@
 package top.asimov.pigeon.model.entity;
 
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
 import com.baomidou.mybatisplus.annotation.IdType;
+import com.baomidou.mybatisplus.annotation.TableField;
 import com.baomidou.mybatisplus.annotation.TableId;
 import com.baomidou.mybatisplus.annotation.TableName;
 import java.time.LocalDateTime;
@@ -29,9 +31,19 @@ public class CookieConfig {
   private String sessionStatus;
   private Boolean autoRefreshEnabled;
   private Integer rotateIntervalSeconds;
-  private LocalDateTime lastRotatedAt;
-  private LocalDateTime nextRotateAt;
-  private LocalDateTime lastCheckedAt;
   private Integer rotateFailureCount;
+
+  // Clearing these is meaningful: a fresh upload has no failure and no schedule yet. The default
+  // update strategy skips null fields, which would leave a stale verdict behind forever.
+  @TableField(updateStrategy = FieldStrategy.ALWAYS)
+  private LocalDateTime lastRotatedAt;
+
+  @TableField(updateStrategy = FieldStrategy.ALWAYS)
+  private LocalDateTime nextRotateAt;
+
+  @TableField(updateStrategy = FieldStrategy.ALWAYS)
+  private LocalDateTime lastCheckedAt;
+
+  @TableField(updateStrategy = FieldStrategy.ALWAYS)
   private String lastFailureReason;
 }

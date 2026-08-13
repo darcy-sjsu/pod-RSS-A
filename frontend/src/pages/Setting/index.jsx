@@ -1121,6 +1121,107 @@ const UserSetting = () => {
     }
   };
 
+  const handleRefreshCookieSession = async (platform) => {
+    if (!platform) return false;
+
+    try {
+      const res = await API.post(`/api/cookies/${platform}/refresh`);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return false;
+      }
+
+      await fetchCookies();
+
+      if (data?.outcome === 'ROTATED') {
+        showSuccess(
+          t('cookie_session_refresh_success', {
+            count: (data.rotatedCookieNames || []).length,
+            seconds: data.nextIntervalSeconds,
+            defaultValue:
+              'Session refreshed: {{count}} cookie(s) updated, next refresh in {{seconds}}s.',
+          }),
+        );
+        return true;
+      }
+
+      const messageKey =
+        data?.outcome === 'SKIPPED'
+          ? 'cookie_session_refresh_skipped'
+          : 'cookie_session_refresh_failed';
+      showError(
+        t(messageKey, {
+          reason: data?.reason || data?.statusCode || 'UNKNOWN',
+          defaultValue: 'Session refresh did not run: {{reason}}',
+        }),
+      );
+      return false;
+    } catch {
+      showError(t('unknown_error', { defaultValue: 'Unknown error' }));
+      return false;
+    }
+  };
+
+  const handleVerifyCookieSession = async (platform) => {
+    if (!platform) return false;
+
+    try {
+      const res = await API.post(`/api/cookies/${platform}/verify`);
+      const { code, msg, data } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return false;
+      }
+
+      await fetchCookies();
+
+      if (data?.authenticated) {
+        showSuccess(
+          t('cookie_session_verify_success', {
+            defaultValue: 'yt-dlp accepted the stored cookies.',
+          }),
+        );
+        return true;
+      }
+
+      showError(
+        t('cookie_session_verify_failed', {
+          message: data?.message || 'UNKNOWN',
+          defaultValue: 'Sign-in check failed: {{message}}',
+        }),
+      );
+      return false;
+    } catch {
+      showError(t('unknown_error', { defaultValue: 'Unknown error' }));
+      return false;
+    }
+  };
+
+  const handleToggleCookieAutoRefresh = async (platform, enabled) => {
+    if (!platform) return false;
+
+    try {
+      const res = await API.post(`/api/cookies/${platform}/auto-refresh`, { enabled });
+      const { code, msg } = res.data;
+      if (code !== 200) {
+        showError(msg);
+        return false;
+      }
+
+      showSuccess(
+        t('cookie_session_auto_refresh_updated', {
+          defaultValue: 'Automatic refresh setting updated.',
+        }),
+      );
+      await fetchCookies();
+      return true;
+    } catch {
+      showError(t('unknown_error', { defaultValue: 'Unknown error' }));
+      return false;
+    }
+  };
+
   const handleDeleteCookie = async (platform) => {
     if (!platform) return false;
 
@@ -3898,6 +3999,9 @@ const UserSetting = () => {
         cookieConfigs={cookieConfigs}
         onUpload={handleUploadCookie}
         onDelete={handleDeleteCookie}
+        onRefresh={handleRefreshCookieSession}
+        onVerify={handleVerifyCookieSession}
+        onToggleAutoRefresh={handleToggleCookieAutoRefresh}
       />
     </Container>
   );

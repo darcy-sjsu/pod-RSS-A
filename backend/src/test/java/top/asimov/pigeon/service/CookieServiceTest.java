@@ -9,6 +9,8 @@ import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
+import com.baomidou.mybatisplus.annotation.FieldStrategy;
+import com.baomidou.mybatisplus.annotation.TableField;
 import java.io.IOException;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
@@ -170,6 +172,23 @@ class CookieServiceTest {
     assertEquals(CookieSessionStatus.ACTIVE.name(), summaries.get(0).getSessionStatus());
     assertTrue(summaries.get(0).getAutoRefreshEnabled());
     assertTrue(!summaries.get(0).toString().contains("login-value"));
+  }
+
+  /**
+   * Clearing a session field has to reach the database. MyBatis-Plus skips null fields on update by
+   * default, which silently leaves a stale failure reason or schedule behind after a fresh upload,
+   * and a mocked mapper cannot catch that.
+   */
+  @Test
+  void nullableSessionFieldsAreWrittenBackEvenWhenCleared() throws NoSuchFieldException {
+    for (String fieldName : java.util.List.of("lastRotatedAt", "nextRotateAt", "lastCheckedAt",
+        "lastFailureReason")) {
+      TableField annotation = CookieConfig.class.getDeclaredField(fieldName)
+          .getAnnotation(TableField.class);
+      assertNotNull(annotation, fieldName + " must declare an update strategy");
+      assertEquals(FieldStrategy.ALWAYS, annotation.updateStrategy(),
+          fieldName + " must be written back even when null");
+    }
   }
 
   private CookieService.CookieSnapshot writeSnapshotFile(String content) throws IOException {
