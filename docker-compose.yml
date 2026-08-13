@@ -1,5 +1,5 @@
-# The app image is built only from this repository's Dockerfile.
-# Compose must not pull a remote pigeon-pod / pod-rss-a image.
+# Local app: must be built from this repository. Do not pull a remote pigeon-pod image.
+# Dependencies such as bgutil-provider may pull public images.
 services:
   pigeon-pod:
     build:
@@ -23,6 +23,7 @@ services:
       - pigeon-pod-data:/data
 
   bgutil-provider:
+    # YouTube PO Token helper: public image is allowed.
     image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
     restart: unless-stopped
 

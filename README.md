@@ -41,9 +41,12 @@
 
 **请先在本机安装 Docker 与 Docker Compose。**
 
-本仓库是修改后的源码。应用镜像**只在本地用当前仓库的 `Dockerfile` 构建**，不会拉取远程 `pigeon-pod` / `pod-rss-a` 镜像，也不要使用上游官方镜像 `ghcr.io/aizhimou/pigeon-pod:latest`。
+本仓库是修改后的源码。部署规则：
 
-`docker-compose.yml` 不为应用服务设置 `image:`，并使用 `pull_policy: build` 与 `build.pull: false`，避免 Compose 先去远程仓库拉镜像。
+- **本地项目必须构建**：`pigeon-pod` 只用当前仓库的 `Dockerfile` 本地构建，不拉取远程应用镜像，也不要使用上游官方镜像 `ghcr.io/aizhimou/pigeon-pod:latest`。
+- **依赖可以拉取公开镜像**：`bgutil-provider` 使用公开镜像 `brainicism/bgutil-ytdlp-pot-provider`，这是 YouTube PO Token 依赖。
+
+`docker-compose.yml` 不为应用服务设置 `image:`，并使用 `pull_policy: build` 与 `build.pull: false`，避免 Compose 先去远程仓库拉应用镜像。
 
 1. 克隆本仓库，并进入仓库根目录（此处有 `Dockerfile` 与 `docker-compose.yml`）
 ```bash
@@ -53,8 +56,8 @@ cd pod-RSS-A
 
 2. 按需修改仓库根目录的 `docker-compose.yml` 环境变量。当前配置如下：
 ```yml
-# The app image is built only from this repository's Dockerfile.
-# Compose must not pull a remote pigeon-pod / pod-rss-a image.
+# Local app: must be built from this repository. Do not pull a remote pigeon-pod image.
+# Dependencies such as bgutil-provider may pull public images.
 services:
   pigeon-pod:
     build:
@@ -78,6 +81,7 @@ services:
       - pigeon-pod-data:/data
 
   bgutil-provider:
+    # YouTube PO Token helper: public image is allowed.
     image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
     restart: unless-stopped
 
