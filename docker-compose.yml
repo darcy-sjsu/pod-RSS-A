@@ -1,7 +1,10 @@
+# Build this modified fork from the local Dockerfile.
+# Do not pull ghcr.io/aizhimou/pigeon-pod — that is the unmodified upstream image.
 services:
   pigeon-pod:
     build: .
-    image: pigeon-pod:latest
+    image: pod-rss-a:latest
+    pull_policy: build
     restart: unless-stopped
     container_name: pigeon-pod
     ports:
@@ -10,6 +13,8 @@ services:
       - SPRING_DATASOURCE_URL=jdbc:sqlite:/data/pigeon-pod.db
       - PIGEON_LOG_FILE=/data/logs/pigeon-pod.log
       - PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL=http://bgutil-provider:4416
+      # Optional: disable PigeonPod built-in auth when running behind another auth layer
+      # - PIGEON_AUTH_ENABLED=false
     depends_on:
       - bgutil-provider
     volumes:

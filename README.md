@@ -41,32 +41,46 @@
 
 **请先在本机安装 Docker 与 Docker Compose。**
 
-1. 使用如下 docker-compose 配置，并按需修改环境变量
+本仓库是修改后的源码，**必须从当前仓库根目录本地构建镜像**。不要使用上游官方镜像 `ghcr.io/aizhimou/pigeon-pod:latest`，那是未修改的原项目。
+
+`docker-compose.yml` 里的 `image: pod-rss-a:latest` 只是给本地构建结果打的标签，不是 Docker Hub / GHCR 上的现成镜像。`pull_policy: build` 会强制 Compose 始终用本仓库 `Dockerfile` 构建，避免误拉上游镜像。
+
+1. 克隆本仓库，并进入仓库根目录（此处有 `Dockerfile` 与 `docker-compose.yml`）
+```bash
+git clone https://github.com/darcy-sjsu/pod-RSS-A.git
+cd pod-RSS-A
+```
+
+2. 按需修改仓库根目录的 `docker-compose.yml` 环境变量。当前配置如下：
 ```yml
+# Build this modified fork from the local Dockerfile.
+# Do not pull ghcr.io/aizhimou/pigeon-pod — that is the unmodified upstream image.
 services:
   pigeon-pod:
     build: .
-    image: 'pigeon-pod:latest'
+    image: pod-rss-a:latest
+    pull_policy: build
     restart: unless-stopped
     container_name: pigeon-pod
     ports:
       - '8834:8080'
     environment:
       - SPRING_DATASOURCE_URL=jdbc:sqlite:/data/pigeon-pod.db # set to your database path
+      - PIGEON_LOG_FILE=/data/logs/pigeon-pod.log
       - PIGEON_YT_DLP_PO_TOKEN_PROVIDER_URL=http://bgutil-provider:4416
       # Optional: disable PigeonPod built-in auth when running behind another auth layer
       # - PIGEON_AUTH_ENABLED=false
-    volumes:
-      - data:/data
     depends_on:
       - bgutil-provider
+    volumes:
+      - pigeon-pod-data:/data
 
   bgutil-provider:
     image: brainicism/bgutil-ytdlp-pot-provider:1.3.1-deno
     restart: unless-stopped
 
 volumes:
-  data:
+  pigeon-pod-data:
 ```
 
 > [!WARNING]
@@ -74,12 +88,12 @@ volumes:
 >
 > 如果关闭内置认证，必须通过其他方式保护 PigeonPod。不要将关闭认证的实例直接暴露在公网。
 
-2. 启动服务
+3. 在仓库根目录构建并启动
 ```bash
-docker-compose up -d
+docker compose up -d --build
 ```
 
-3. 访问应用
+4. 访问应用
 浏览器打开 `http://localhost:8834`，默认用户名：`root`，默认密码：`Root@123`
 
 ### 使用 JAR 运行
