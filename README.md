@@ -41,9 +41,9 @@
 
 **请先在本机安装 Docker 与 Docker Compose。**
 
-本仓库是修改后的源码，**必须从当前仓库根目录本地构建镜像**。不要使用上游官方镜像 `ghcr.io/aizhimou/pigeon-pod:latest`，那是未修改的原项目。
+本仓库是修改后的源码。应用镜像**只在本地用当前仓库的 `Dockerfile` 构建**，不会拉取远程 `pigeon-pod` / `pod-rss-a` 镜像，也不要使用上游官方镜像 `ghcr.io/aizhimou/pigeon-pod:latest`。
 
-`docker-compose.yml` 里的 `image: pod-rss-a:latest` 只是给本地构建结果打的标签，不是 Docker Hub / GHCR 上的现成镜像。`pull_policy: build` 会强制 Compose 始终用本仓库 `Dockerfile` 构建，避免误拉上游镜像。
+`docker-compose.yml` 不为应用服务设置 `image:`，并使用 `pull_policy: build` 与 `build.pull: false`，避免 Compose 先去远程仓库拉镜像。
 
 1. 克隆本仓库，并进入仓库根目录（此处有 `Dockerfile` 与 `docker-compose.yml`）
 ```bash
@@ -53,12 +53,14 @@ cd pod-RSS-A
 
 2. 按需修改仓库根目录的 `docker-compose.yml` 环境变量。当前配置如下：
 ```yml
-# Build this modified fork from the local Dockerfile.
-# Do not pull ghcr.io/aizhimou/pigeon-pod — that is the unmodified upstream image.
+# The app image is built only from this repository's Dockerfile.
+# Compose must not pull a remote pigeon-pod / pod-rss-a image.
 services:
   pigeon-pod:
-    build: .
-    image: pod-rss-a:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      pull: false
     pull_policy: build
     restart: unless-stopped
     container_name: pigeon-pod

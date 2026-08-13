@@ -1,9 +1,11 @@
-# Build this modified fork from the local Dockerfile.
-# Do not pull ghcr.io/aizhimou/pigeon-pod — that is the unmodified upstream image.
+# The app image is built only from this repository's Dockerfile.
+# Compose must not pull a remote pigeon-pod / pod-rss-a image.
 services:
   pigeon-pod:
-    build: .
-    image: pod-rss-a:latest
+    build:
+      context: .
+      dockerfile: Dockerfile
+      pull: false
     pull_policy: build
     restart: unless-stopped
     container_name: pigeon-pod
